@@ -1,0 +1,8 @@
+build/
+iso_root/
+*.o
+*.elf
+*.bin
+*.img
+*.ppm
+*.log
