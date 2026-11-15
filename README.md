@@ -7,7 +7,6 @@ It is not Linux. It is a 32-bit freestanding kernel with its own bootloader, a s
 ![Setup](screenshots/01-setup.png)
 
 ## What you can do
-
 - Boot the CD and run **GeometricalOS Setup**, which partitions the virtual hard disk, formats it, copies the system, and installs a bootloader.
 - Eject the CD and boot GeometricalOS from the hard disk.
 - Log on with the name you chose during Setup. A password is optional.
