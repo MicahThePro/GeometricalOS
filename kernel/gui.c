@@ -92,6 +92,12 @@ void gui_restore(Window *w) {
     gui_focus(w);
 }
 
+void gui_set_timer(Window *w, uint32_t interval) {
+    if (!w || !w->used) return;
+    w->timer_interval = interval;
+    w->timer_last = timer_ticks();
+}
+
 void gui_close(Window *w) {
     if (!w || !w->used || w->keep) return;
     if (menu_win == w) menu_on = 0;
@@ -1201,6 +1207,18 @@ void gui_pump(void) {
     KeyEvent k;
     while (input_key(&k)) { activity = 1; on_key(&k); }
     if (mouse_x != ox || mouse_y != oy) { activity = 1; on_move(); }
+    uint32_t now = timer_ticks();
+    for (int i = 0; i < MAXW; i++) {
+        Window *w = &wins[i];
+        if (!w->used || w->minimized || !w->timer_interval ||
+            now - w->timer_last < w->timer_interval) continue;
+        w->timer_last = now;
+        Event e;
+        memset(&e, 0, sizeof(e));
+        e.type = EVT_TIMER;
+        send(w, &e);
+        dirty = 1;
+    }
     if (activity) last_input = sec;
     if (!modal_active()) {
         int idle = sec - last_input;

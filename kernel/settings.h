@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 void settings_load(void);
-void settings_save(void);
+int settings_save(void);
 
 int settings_scheme(void);
 void settings_set_scheme(int scheme);
@@ -24,5 +24,8 @@ void settings_set_mouse(int speed, int dbl_ticks, int swap);
 int settings_sound_on(void);
 int settings_volume(void);
 void settings_set_sound(int on, int volume);
+
+int settings_timezone_minutes(void);
+int settings_set_timezone_minutes(int minutes);
 
 #endif

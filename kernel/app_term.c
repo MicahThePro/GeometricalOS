@@ -6,7 +6,6 @@
 #include "input.h"
 #include "io.h"
 #include "serial.h"
-#include "net.h"
 
 #define TLINES 18
 #define TCOLS 62
@@ -94,7 +93,7 @@ static void run_cmd(char *cmd) {
     if (strcmp(op, "help") == 0) {
         term_print("dir ls  cd  type cat  echo  cls");
         term_print("mkdir  del  ver  date time");
-        term_print("ipconfig  ping  shutdown  restart");
+        term_print("shutdown  restart");
     } else if (strcmp(op, "cls") == 0) {
         nrows = 0;
     } else if (strcmp(op, "ver") == 0) {
@@ -155,42 +154,6 @@ static void run_cmd(char *cmd) {
         b[yp++] = (char)('0' + t.sec % 10);
         b[yp] = 0;
         term_print(b);
-    } else if (strcmp(op, "ipconfig") == 0) {
-        if (net_init()) term_print("No network. Use PCnet-FAST III.");
-        else {
-            char line[40];
-            strcpy(line, "IP ");
-            net_format_ip(net_ip(), line + 3, 24);
-            term_print(line);
-            strcpy(line, "Mask ");
-            net_format_ip(net_mask(), line + 5, 24);
-            term_print(line);
-            strcpy(line, "Gateway ");
-            net_format_ip(net_gateway(), line + 8, 24);
-            term_print(line);
-            strcpy(line, "DNS ");
-            net_format_ip(net_dns(), line + 4, 24);
-            term_print(line);
-        }
-    } else if (strcmp(op, "ping") == 0) {
-        uint32_t dip = 0;
-        if (!arg[0]) term_print("ping hostname");
-        else if (net_init() || net_resolve(arg, &dip)) term_print("Could not resolve");
-        else {
-            int ticks = 0;
-            if (net_ping(dip, &ticks)) term_print("No reply");
-            else {
-                char line[32];
-                strcpy(line, "Reply in ticks ");
-                int o = 15, v = ticks, r = 0;
-                char rev[8];
-                if (!v) rev[r++] = '0';
-                while (v && r < 8) { rev[r++] = (char)('0' + v % 10); v /= 10; }
-                while (r) line[o++] = rev[--r];
-                line[o] = 0;
-                term_print(line);
-            }
-        }
     } else if (strcmp(op, "shutdown") == 0) {
         session_shutdown();
     } else if (strcmp(op, "restart") == 0) {

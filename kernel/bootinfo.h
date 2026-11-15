@@ -23,6 +23,7 @@ typedef struct {
     uint32_t ext_mem_kb;
     uint32_t font_addr;
     uint32_t font_height;
+    uint32_t boot_drive;
 } BootInfo;
 
 static inline const BootInfo *bootinfo(void) {

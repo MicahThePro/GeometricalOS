@@ -12,6 +12,7 @@ static int dbl_ticks = 45;
 static int swap_buttons = 0;
 static int sound_on = 1;
 static int volume = 8;
+static int timezone_minutes = 0;
 
 static int clamp(int v, int lo, int hi) {
     if (v < lo) return lo;
@@ -36,6 +37,27 @@ static int field(const char *text, const char *key, int fallback) {
     return fallback;
 }
 
+static int signed_field(const char *text, const char *key, int fallback) {
+    int klen = (int)strlen(key);
+    const char *p = text;
+    while (*p) {
+        if (strncmp(p, key, (size_t)klen) == 0 && p[klen] == '=') {
+            const char *n = p + klen + 1;
+            int sign = 1, v = 0, digits = 0;
+            if (*n == '-') { sign = -1; n++; }
+            while (*n >= '0' && *n <= '9') {
+                if (v > 10000) return fallback;
+                v = v * 10 + (*n++ - '0');
+                digits++;
+            }
+            return digits ? sign * v : fallback;
+        }
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+    }
+    return fallback;
+}
+
 void settings_load(void) {
     int id = fs_lookup(FS_ROOT, "SETTINGS.CFG");
     if (id < 0) return;
@@ -51,6 +73,8 @@ void settings_load(void) {
     swap_buttons = field(buf, "mswap", swap_buttons) ? 1 : 0;
     sound_on = field(buf, "sound", sound_on) ? 1 : 0;
     volume = clamp(field(buf, "volume", volume), 0, 15);
+    timezone_minutes = clamp(signed_field(buf, "timezone", timezone_minutes), -720, 840);
+    if (timezone_minutes % 15) timezone_minutes = 0;
     serial_write("SET: scheme ");
     serial_dec((uint32_t)scheme);
     serial_write(" sound ");
@@ -60,28 +84,36 @@ void settings_load(void) {
     serial_write("\n");
 }
 
-void settings_save(void) {
+int settings_save(void) {
     char buf[160];
     int n = 0;
-    const char *keys[] = {"scheme", "saveron", "saver", "mspeed", "mdbl", "mswap", "sound", "volume"};
-    int vals[] = {scheme, saver_on, saver_sec, mouse_speed, dbl_ticks, swap_buttons, sound_on, volume};
-    for (int i = 0; i < 8; i++) {
+    const char *keys[] = {"scheme", "saveron", "saver", "mspeed", "mdbl", "mswap", "sound", "volume", "timezone"};
+    int vals[] = {scheme, saver_on, saver_sec, mouse_speed, dbl_ticks, swap_buttons, sound_on, volume, timezone_minutes};
+    for (int i = 0; i < 9; i++) {
         const char *k = keys[i];
         while (*k && n < 150) buf[n++] = *k++;
         if (n < 150) buf[n++] = '=';
         char rev[8];
         int r = 0, v = vals[i];
+        int negative = v < 0;
+        if (negative) v = -v;
         if (!v) rev[r++] = '0';
         while (v && r < 8) { rev[r++] = (char)('0' + v % 10); v /= 10; }
+        if (negative && n < 150) buf[n++] = '-';
         while (r && n < 150) buf[n++] = rev[--r];
         if (n < 150) buf[n++] = '\n';
     }
     buf[n] = 0;
-    if (fs_write(FS_ROOT, "SETTINGS.CFG", buf, (uint32_t)n) < 0)
+    if (fs_write(FS_ROOT, "SETTINGS.CFG", buf, (uint32_t)n) < 0) {
         serial_write("SET: write failed\n");
-    else
-        serial_write("SET: saved\n");
-    ata_flush();
+        return -1;
+    }
+    if (ata_flush()) {
+        serial_write("SET: flush failed\n");
+        return -1;
+    }
+    serial_write("SET: saved\n");
+    return 0;
 }
 
 int settings_scheme(void) { return scheme; }
@@ -123,4 +155,15 @@ void settings_set_sound(int on, int vol) {
     sound_on = on ? 1 : 0;
     volume = clamp(vol, 0, 15);
     settings_save();
+}
+
+int settings_timezone_minutes(void) { return timezone_minutes; }
+int settings_set_timezone_minutes(int minutes) {
+    int previous = timezone_minutes;
+    timezone_minutes = clamp(minutes, -720, 840);
+    if (settings_save() < 0) {
+        timezone_minutes = previous;
+        return -1;
+    }
+    return 0;
 }

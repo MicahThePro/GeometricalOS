@@ -13,7 +13,7 @@ enum {
     ICON_MINE,
     ICON_TERM,
     ICON_SOL,
-    ICON_WEB
+    ICON_SNAKE
 };
 
 enum {
@@ -23,7 +23,8 @@ enum {
     EVT_UP,
     EVT_MOVE,
     EVT_RDOWN,
-    EVT_MENU
+    EVT_MENU,
+    EVT_TIMER
 };
 
 #define MENU_MAX 4
@@ -65,6 +66,8 @@ struct Window {
     Window **owner;
     int icon;
     void *user;
+    uint32_t timer_interval;
+    uint32_t timer_last;
 };
 
 void gui_run(void);
@@ -75,6 +78,7 @@ void gui_close(Window *w);
 void gui_focus(Window *w);
 void gui_move(Window *w, int x, int y);
 void gui_restore(Window *w);
+void gui_set_timer(Window *w, uint32_t interval);
 void window_client(Window *w, int *x, int *y, int *cw, int *ch);
 void window_add_menu(Window *w, const char *label);
 void window_add_item(Window *w, int menu, const char *label, int id);

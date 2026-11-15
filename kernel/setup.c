@@ -7,6 +7,9 @@
 #include "sound.h"
 #include "serial.h"
 #include "io.h"
+#include "rtc.h"
+#include "settings.h"
+#include "pci.h"
 
 static char acct_name[28] = "User";
 static char acct_pass[28];
@@ -18,6 +21,106 @@ extern char kernel_file_end[];
 static int dx, dy, dw, dh;
 static int busy_pct;
 static const char *busy_msg;
+static RtcTime install_clock;
+static int install_timezone;
+static int install_clock_from_rtc;
+static int setup_vm_detected;
+
+static int ask_line(const char *marker, const char *heading, const char *prompt,
+                    char *buf, int secret);
+
+static void put2(char *out, int value) {
+    out[0] = (char)('0' + (value / 10) % 10);
+    out[1] = (char)('0' + value % 10);
+}
+
+static void put4(char *out, int value) {
+    out[0] = (char)('0' + (value / 1000) % 10);
+    out[1] = (char)('0' + (value / 100) % 10);
+    out[2] = (char)('0' + (value / 10) % 10);
+    out[3] = (char)('0' + value % 10);
+}
+
+static int parse_digits(const char *text, int length, int *value) {
+    if ((int)strlen(text) != length) return 0;
+    int result = 0;
+    for (int i = 0; i < length; i++) {
+        if (text[i] < '0' || text[i] > '9') return 0;
+        result = result * 10 + text[i] - '0';
+    }
+    *value = result;
+    return 1;
+}
+
+static int parse_timezone(const char *text, int *minutes) {
+    int sign = 1, value = 0, digits = 0;
+    if (*text == '-') { sign = -1; text++; }
+    while (*text >= '0' && *text <= '9') {
+        value = value * 10 + *text++ - '0';
+        if (value > 840) return 0;
+        digits++;
+    }
+    if (!digits || *text || value % 15) return 0;
+    value *= sign;
+    if (value < -720 || value > 840) return 0;
+    *minutes = value;
+    return 1;
+}
+
+static int days_in_month(int year, int month) {
+    static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    if (month == 2 && leap) return 29;
+    return month >= 1 && month <= 12 ? days[month - 1] : 0;
+}
+
+static void format_timezone(char *out, int minutes) {
+    int magnitude = minutes < 0 ? -minutes : minutes;
+    out[0] = 'U'; out[1] = 'T'; out[2] = 'C';
+    out[3] = minutes < 0 ? '-' : '+';
+    put2(out + 4, magnitude / 60);
+    out[6] = ':';
+    put2(out + 7, magnitude % 60);
+    out[9] = 0;
+}
+
+static void format_offset_input(char *out, int minutes) {
+    int value = minutes < 0 ? -minutes : minutes;
+    int n = 0;
+    if (minutes < 0) out[n++] = '-';
+    if (value >= 100) out[n++] = (char)('0' + value / 100);
+    if (value >= 10) out[n++] = (char)('0' + (value / 10) % 10);
+    out[n++] = (char)('0' + value % 10);
+    out[n] = 0;
+}
+
+static int cpuid_available(void) {
+    uint32_t original, changed;
+    __asm__ volatile ("pushfl\n\tpopl %0" : "=r"(original));
+    changed = original ^ (1u << 21);
+    __asm__ volatile ("pushl %0\n\tpopfl" : : "r"(changed) : "cc", "memory");
+    __asm__ volatile ("pushfl\n\tpopl %0" : "=r"(changed));
+    __asm__ volatile ("pushl %0\n\tpopfl" : : "r"(original) : "cc", "memory");
+    return ((original ^ changed) & (1u << 21)) != 0;
+}
+
+static void cpuid(uint32_t leaf, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
+    __asm__ volatile ("cpuid"
+                      : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
+                      : "a"(leaf), "c"(0));
+}
+
+static int detect_virtual_machine(void) {
+    int bus, dev, fn;
+    if (pci_find(0x80EE, 0xCAFE, &bus, &dev, &fn) == 0) return 1;
+    if (!cpuid_available()) return 0;
+    uint32_t max_leaf, b, c, d;
+    cpuid(0, &max_leaf, &b, &c, &d);
+    if (max_leaf < 1) return 0;
+    uint32_t a;
+    cpuid(1, &a, &b, &c, &d);
+    return (c & 0x80000000u) != 0;
+}
 
 static void present(void) {
     gfx_present();
@@ -126,13 +229,17 @@ static void progress_ui(int pct, const char *msg) {
 }
 
 static int do_install(const AtaDisk *disk) {
+    if (!install_clock_from_rtc &&
+        rtc_set_local_with_offset(&install_clock, install_timezone) < 0)
+        return 12;
     progress_ui(8, "Preparing the disk...");
     if (fs_format(disk->sectors)) return 1;
+    if (settings_set_timezone_minutes(install_timezone) < 0) return 13;
     progress_ui(22, "Writing welcome files...");
     static const char readme[] =
         "Welcome to GeometricalOS!\r\n"
         "\r\n"
-        "This file lives on the virtual hard disk.\r\n"
+        "This file lives on the computer's hard disk.\r\n"
         "Open it from File Manager, or from Notepad's\r\n"
         "File menu. You can edit it and save it back.\r\n"
         "\r\n"
@@ -217,7 +324,7 @@ static void draw_welcome(void) {
     frame("GeometricalOS Setup");
     line(34, "Welcome to Setup", COL_BLACK);
     line(62, "This program installs GeometricalOS", COL_BLACK);
-    line(80, "onto your virtual hard disk.", COL_BLACK);
+    line(80, "onto the computer's hard disk.", COL_BLACK);
     line(108, "The disk on IDE Primary Master", COL_BLACK);
     line(126, "will be erased.", COL_MAROON);
     line(154, "Press ENTER to continue.", COL_NAVY);
@@ -233,7 +340,7 @@ static void draw_disk(const AtaDisk *disk, const char *err) {
         line(96, "Use an IDE controller, not SATA.", COL_BLACK);
         line(114, "Hard disk: Primary Master.", COL_BLACK);
         line(132, "CD: Secondary Master.", COL_BLACK);
-        line(160, "Fix the VM, then press ENTER.", COL_NAVY);
+        line(160, "Fix the computer, then press ENTER.", COL_NAVY);
         draw_buttons("Retry", "Exit");
     } else {
         line(34, "Setup will erase this disk:", COL_BLACK);
@@ -258,12 +365,107 @@ static void draw_disk(const AtaDisk *disk, const char *err) {
 static void draw_done(void) {
     frame("GeometricalOS Setup");
     line(34, "GeometricalOS is now installed.", COL_BLACK);
-    line(62, "1. In VirtualBox, choose Devices,", COL_BLACK);
-    line(80, "   Optical Drives, Remove disk.", COL_BLACK);
-    line(108, "2. Press ENTER to restart.", COL_BLACK);
-    line(136, "The next boot uses the hard disk.", COL_NAVY);
+    line(62, "You may remove the installation disk.", COL_BLACK);
+    line(88, "Press ENTER to restart.", COL_BLACK);
+    line(116, "At startup, press a key for the disk,", COL_NAVY);
+    line(134, "or wait to boot from the hard drive.", COL_NAVY);
     draw_buttons("Restart", 0);
     present();
+}
+
+static void draw_clock_setup(void) {
+    frame("GeometricalOS Setup");
+    line(34, "Date and time", COL_BLACK);
+    line(62, setup_vm_detected ? "Virtual machine detected; using its RTC clock."
+                               : "Using the computer's hardware RTC clock.",
+         COL_NAVY);
+    char stamp[20], zone[10];
+    put4(stamp, install_clock.year); stamp[4] = '-'; put2(stamp + 5, install_clock.month);
+    stamp[7] = '-'; put2(stamp + 8, install_clock.day); stamp[10] = ' ';
+    put2(stamp + 11, install_clock.hour); stamp[13] = ':';
+    put2(stamp + 14, install_clock.min); stamp[16] = ':';
+    put2(stamp + 17, install_clock.sec); stamp[19] = 0;
+    format_timezone(zone, install_timezone);
+    line(88, "Current clock:", COL_BLACK);
+    gfx_text(dx + 208, dy + 88, stamp, COL_NAVY, COL_GRAY);
+    line(114, "UTC offset:", COL_BLACK);
+    gfx_text(dx + 192, dy + 114, zone, COL_NAVY, COL_GRAY);
+    line(142, "RTC supplies date/time, not the time zone.", COL_BLACK);
+    line(160, "Continue accepts these values; Change to edit.", COL_BLACK);
+    draw_buttons("Continue", "Change");
+    present();
+}
+
+static int configure_clock(void) {
+    setup_vm_detected = detect_virtual_machine();
+    rtc_read(&install_clock);
+    install_timezone = settings_timezone_minutes();
+    install_clock_from_rtc = 1;
+
+    for (;;) {
+        draw_clock_setup();
+        int choice = 0;
+        while (!choice) {
+            choice = poll_choice("Continue", "Change");
+            if (!choice) { cursor_restore(); cursor_draw(mouse_x, mouse_y); }
+        }
+        if (choice == 1) {
+            return 1;
+        }
+
+        char date[28], time[28], offset[28];
+        put4(date, install_clock.year);
+        put2(date + 4, install_clock.month);
+        put2(date + 6, install_clock.day);
+        date[8] = 0;
+        const char *prompt = "Date as YYYYMMDD (2000-2099):";
+        int value;
+        for (;;) {
+            ask_line("SETUP: DATE\n", "Set the date", prompt, date, 0);
+            if (parse_digits(date, 8, &value)) {
+                install_clock.year = value / 10000;
+                install_clock.month = (value / 100) % 100;
+                install_clock.day = value % 100;
+                if (install_clock.year >= 2000 && install_clock.year <= 2099 &&
+                    install_clock.month >= 1 && install_clock.month <= 12 &&
+                    install_clock.day >= 1 &&
+                    install_clock.day <= days_in_month(install_clock.year, install_clock.month))
+                    break;
+            }
+            prompt = "Invalid date. Use YYYYMMDD, year 2000-2099.";
+        }
+
+        put2(time, install_clock.hour);
+        put2(time + 2, install_clock.min);
+        put2(time + 4, install_clock.sec);
+        time[6] = 0;
+        prompt = "Time as HHMMSS (24-hour):";
+        for (;;) {
+            ask_line("SETUP: TIME\n", "Set the time", prompt, time, 0);
+            if (parse_digits(time, 6, &value)) {
+                install_clock.hour = value / 10000;
+                install_clock.min = (value / 100) % 100;
+                install_clock.sec = value % 100;
+                if (install_clock.hour <= 23 &&
+                    install_clock.min <= 59 && install_clock.sec <= 59)
+                    break;
+            }
+            prompt = "Invalid time. Use HHMMSS in 24-hour time.";
+        }
+
+        format_offset_input(offset, install_timezone);
+        prompt = "UTC offset minutes (-720..840, step 15):";
+        for (;;) {
+            ask_line("SETUP: ZONE\n", "Set the time zone", prompt, offset, 0);
+            if (parse_timezone(offset, &install_timezone) &&
+                rtc_local_valid_for_offset(&install_clock, install_timezone))
+                break;
+            prompt = "Invalid zone/date. Use -720..840, step 15.";
+        }
+
+        install_clock_from_rtc = 0;
+        return 1;
+    }
 }
 
 static void draw_fail(int code) {
@@ -275,8 +477,16 @@ static void draw_fail(int code) {
     buf[n++] = (char)('0' + code % 10);
     buf[n] = 0;
     line(62, buf, COL_BLACK);
-    line(96, "The disk may be missing, too small,", COL_BLACK);
-    line(114, "or not the IDE primary master.", COL_BLACK);
+    if (code == 12) {
+        line(96, "The requested date/time could not be set.", COL_BLACK);
+        line(114, "Check the date and UTC offset.", COL_BLACK);
+    } else if (code == 13) {
+        line(96, "Time zone settings could not be saved.", COL_BLACK);
+        line(114, "Check that the disk is writable.", COL_BLACK);
+    } else {
+        line(96, "The disk may be missing, too small,", COL_BLACK);
+        line(114, "or not the IDE primary master.", COL_BLACK);
+    }
     draw_buttons("Back", "Exit");
     present();
 }
@@ -380,6 +590,7 @@ int run_setup(void) {
                 if (!d) { cursor_restore(); cursor_draw(mouse_x, mouse_y); }
             }
             if (d == 2) break;
+            configure_clock();
             int rc = do_install(&disk);
             if (rc) {
                 serial_write("SETUP: ERROR\n");

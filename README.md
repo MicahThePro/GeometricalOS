@@ -11,7 +11,7 @@ It is not Linux. It is a 32-bit freestanding kernel with its own bootloader, a s
 - Eject the CD and boot GeometricalOS from the hard disk.
 - Log on with the name you chose during Setup. A password is optional.
 - Use the mouse and keyboard on a Windows 3.1-style desktop.
-- Open **File Manager, Notepad, Calculator, Clock, Paint, Minesweeper, Terminal, and Solitaire**.
+- Open **File Manager, Notepad, Calculator, Clock, Paint, Minesweeper, Terminal, Solitaire, and Snake**.
 - Pick a geometric wallpaper, wait for the flying-shapes screensaver, and shut down or restart.
 
 ![Desktop](screenshots/04-desktop.png)
@@ -25,8 +25,6 @@ It is not Linux. It is a 32-bit freestanding kernel with its own bootloader, a s
 | ![Clock](screenshots/07-clock.png) | ![Paint](screenshots/08-paint.png) |
 | ![Minesweeper](screenshots/09-minesweeper.png) | ![File Manager](screenshots/10-file-manager.png) |
 | ![Terminal](screenshots/11-terminal.png) | ![Solitaire](screenshots/12-solitaire.png) |
-| ![Browser](screenshots/13-browser.png) | ![ipconfig](screenshots/14-ipconfig.png) |
-| ![example.com](screenshots/17-example.png) | ![httpforever.com](screenshots/16-httpforever.png) |
 
 The boot splash is a static geometric logo (a square, a circle, and a triangle) with the name GeometricalOS. It stays up for a couple of seconds, then the logon screen appears.
 
@@ -81,17 +79,16 @@ In System, Motherboard, boot order:
 
 ## Install, then boot from the hard disk
 
-1. Start the VM. Setup opens on a blue screen.
+1. Start the VM. A terminal-style boot report shows the actual boot source, BIOS memory, and video mode; then Setup opens on a blue screen.
 2. Press **Enter** to continue.
 3. Type a name, or just press **Enter** to keep `User`.
 4. Type a password, or press **Enter** to leave it blank. The password is stored in a plain text file named `USER.DAT` on the GeometricalOS disk. It is not encrypted.
-5. Read the disk name and size. Press **Enter** to install. This erases that virtual disk.
-6. When Setup says GeometricalOS is installed, eject the CD: **Devices → Optical Drives → Remove disk from virtual drive**.
-7. Press **Enter** to restart.
-8. The logo appears, then the logon screen. The name you chose is filled in. Press **Enter**.
-9. Program Manager opens on the teal desktop.
-
-If the VM boots the CD again, the ISO is still attached or Optical is still first in the boot order. Remove the ISO.
+5. Setup reads the BIOS/VM clock. If it detects a VM, that clock is selected automatically; choose **Change** to edit the date, time, or UTC offset. The BIOS does not provide the host time zone, so the offset defaults to UTC.
+6. Read the disk name and size. Press **Enter** to install. This erases the selected hard disk.
+7. When Setup finishes, you may remove the installation disk, then press **Enter** to restart.
+8. If the installer disk is still inserted, the startup prompt lets you choose: press a key to boot from the CD/DVD, or wait to start GeometricalOS from the hard drive.
+9. The boot report confirms the hard-disk boot and shows the detected IDE disk and filesystem. The logo appears, then the logon screen. The name you chose is filled in. Press **Enter**.
+10. Program Manager opens on the teal desktop.
 
 ## Using the desktop
 
@@ -100,7 +97,7 @@ If the VM boots the CD again, the ISO is still attached or Optical is still firs
 - Minimized windows sit along the bottom of the desktop. Click one to restore it.
 - Double-click a group icon in Program Manager (**Main**, **Accessories**, **Games**), then double-click a program.
 - **Alt+Tab** cycles windows. **Alt+F4** closes the focused window. On Program Manager, close means exit.
-- **File → Exit GeometricalOS** asks Shutdown, Restart, or Cancel. Shutdown shows “It is now safe to turn off your computer.” Press Enter there to try to power the VM off. Restart reboots.
+- **File → Exit GeometricalOS** asks Shutdown, Restart, or Cancel. Shutdown shows “It is now safe to turn off your computer.” Press Enter there to try powering off the computer. Restart reboots.
 - The screensaver starts after about 45 seconds with no keyboard or mouse input. Press a key or move the mouse to come back.
 - **Options → Wallpaper** switches between solid teal, tiles, stripes, and diamonds. The choice is saved on disk.
 
@@ -116,23 +113,23 @@ If the VM boots the CD again, the ISO is still attached or Optical is still firs
 | F7 | Minesweeper |
 | F8 | Terminal |
 | F9 | Solitaire |
-| F10 | Web Browser |
-| F11 | Control Panel |
-| F12 | Media Player |
+| F10 | Control Panel |
+| F11 | Media Player |
+| F12 | Snake |
 
 ### The programs
 
 - **Notepad** — File → New, Open, Save, and Save As. The dialog lists folders and files, has a file-name box, and OK / Cancel. Closing a changed document asks whether to save. Files stay on the GeoFS disk across reboots. Open `.TXT` from File Manager.
 - **Calculator** — mouse or keyboard. `+ - * /`, decimal point, backspace, and C.
-- **Clock** — analog and digital time from the virtual machine’s clock.
+- **Clock** — analog and digital local time. Set the date, time, and fixed UTC offset in Control Panel → Date/Time; the offset is saved in `SETTINGS.CFG` and the date/time are written to the hardware RTC. The RTC is treated as UTC, and daylight-saving transitions are not automatic. A working battery-backed RTC is required to keep time while powered off.
 - **Paint** — Pen, Line, Box, Fill, Clear, and 16 colors. Keys: P, L, B, F, C. File → Save writes a `.GIM` picture. File Manager opens those in Paint. Unsaved changes are asked about on close.
 - **Minesweeper** — beginner 9×9 grid, 10 mines. Left click opens, right click flags. The first click is never a mine. Click the face to start over.
 - **File Manager** — folders and files. Enter a folder, go up, delete, and open `.TXT` files in Notepad or `.GIM` pictures in Paint.
-- **Terminal** — type `help`. Commands: `dir` or `ls`, `cd`, `type` or `cat`, `echo`, `cls`, `mkdir`, `del`, `ver`, `date`, `time`, `ipconfig`, `ping`, `shutdown`, `restart`.
-- **Web Browser** — HTTP only. Address bar, Back, Forward, Reload, and Go. It shows headings, paragraphs, lists, bold, italic, preformatted text, and clickable `http://` links. `https://` is refused.
-- **Control Panel** — color scheme, desktop pattern, screensaver, mouse speed and buttons, date and time, sound, and the DHCP address. Choices are stored in `SETTINGS.CFG`.
+- **Terminal** — type `help`. Commands: `dir` or `ls`, `cd`, `type` or `cat`, `echo`, `cls`, `mkdir`, `del`, `ver`, `date`, `time`, `shutdown`, and `restart`.
+- **Control Panel** — color scheme, desktop pattern, screensaver, mouse speed and buttons, date/time and fixed UTC offset, and sound. Settings are stored in `SETTINGS.CFG`.
 - **Media Player** — Play, Pause, and Stop for five short built-in tunes, with a position bar. Sound Blaster 16 plays them when that card is selected; otherwise the PC speaker does.
 - **Solitaire** — Klondike, one card at a time. Click the deck to draw. Click a card, then a pile, to move it. Double-click a card to file it on a foundation when the rules allow. Press N for a new game.
+- **Snake** — steer with the arrow keys or WASD, eat the apples to grow, and avoid the walls and your tail. Press Space to pause or N to start a new game.
 
 ## Build it yourself (Linux or WSL)
 
@@ -173,18 +170,6 @@ The kernel is freestanding C and NASM. It enters 32-bit protected mode, sets a V
 
 The same IDE layout VirtualBox uses was tested with QEMU: hard disk on the primary master, CD on the secondary master, PS/2 mouse, 64 MB RAM, and the standard VGA card. Setup installed onto a blank 32 MB disk, and the next boot came from that disk through logon, Program Manager, and every built-in program.
 
-## Network
-
-In VirtualBox, open the VM settings, **Network**, Adapter 1:
-
-- Enable the adapter
-- Attached to: **NAT**
-- Adapter type: **PCnet-FAST III (Am79C973)**
-
-That is the card GeometricalOS drives. Intel PRO/1000 is not driven. Do not use a virtio NIC. NAT gives DHCP, a gateway, and DNS. The browser speaks **HTTP only**. An `https://` address is turned down in the window; there is no TLS.
-
-QEMU’s matching setup is `-device pcnet,netdev=n0 -netdev user,id=n0`.
-
 ## Limits
 
-One IDE disk, no USB, no sound card besides Sound Blaster 16 and the PC speaker, and deleted files do not always reuse their disk space until you install again.
+No networking or Internet access is implemented. One IDE disk, no USB, no sound card besides Sound Blaster 16 and the PC speaker, and deleted files do not always reuse their disk space until you install again.
