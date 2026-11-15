@@ -7,6 +7,7 @@
 #include "sound.h"
 #include "wallpaper.h"
 #include "serial.h"
+#include "version.h"
 #include <stdint.h>
 
 static Window *pm;
@@ -102,7 +103,7 @@ static void pm_event(Window *w, Event *e) {
         else if (e->menu_id == 3) app_wall_open();
         else if (e->menu_id == 2) {
             gui_dialog("About GeometricalOS",
-                       "GeometricalOS version 1.0\n\n"
+                   "GeometricalOS version " GOS_VERSION "\n\n"
                        "A tiny hobby operating system\n"
                        "inspired by Windows 3.1.\n\n"
                        "Notepad, Paint, Minesweeper,\n"
@@ -195,7 +196,7 @@ void splash_screen(void) {
     int scale = gfx_width() >= 800 ? 3 : 2;
     int tw = (int)strlen(name) * 8 * scale;
     gfx_text_scaled(cx - tw / 2, cy + 40, name, COL_WHITE, scale);
-    const char *ver = "Version 1.0";
+    const char *ver = "Version " GOS_VERSION;
     gfx_text(cx - gfx_text_width(ver) / 2, cy + 48 + gfx_font_h() * scale, ver, COL_YELLOW, COL_NAVY);
     gfx_present();
     sleep_seconds(2);

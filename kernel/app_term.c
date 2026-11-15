@@ -6,6 +6,7 @@
 #include "input.h"
 #include "io.h"
 #include "serial.h"
+#include "version.h"
 
 #define TLINES 18
 #define TCOLS 62
@@ -97,7 +98,7 @@ static void run_cmd(char *cmd) {
     } else if (strcmp(op, "cls") == 0) {
         nrows = 0;
     } else if (strcmp(op, "ver") == 0) {
-        term_print("GeometricalOS version 1.0");
+        term_print("GeometricalOS version " GOS_VERSION);
     } else if (strcmp(op, "dir") == 0 || strcmp(op, "ls") == 0) {
         cmd_dir();
     } else if (strcmp(op, "cd") == 0) {
