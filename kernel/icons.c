@@ -65,11 +65,14 @@ void icons_draw(int id, int x, int y) {
         gfx_fill_triangle(x + 12, y + 18, x + 16, y + 26, x + 20, y + 18, COL_RED);
         return;
     }
-    if (id == ICON_WEB) {
-        gfx_fill_circle(x + 16, y + 16, 12, COL_LTBLUE);
-        gfx_circle(x + 16, y + 16, 12, COL_WHITE);
-        gfx_hline(x + 4, y + 16, 24, COL_WHITE);
-        gfx_vline(x + 16, y + 4, 24, COL_WHITE);
+    if (id == ICON_SNAKE) {
+        gfx_fill(x + 3, y + 3, 26, 26, 0x004020);
+        gfx_rect(x + 3, y + 3, 26, 26, COL_BLACK);
+        gfx_fill(x + 7, y + 18, 6, 6, 0x00C040);
+        gfx_fill(x + 13, y + 18, 6, 6, 0x00C040);
+        gfx_fill(x + 13, y + 12, 6, 6, 0x00C040);
+        gfx_fill(x + 19, y + 12, 6, 6, 0x80FF80);
+        gfx_fill_circle(x + 25, y + 6, 3, COL_RED);
         return;
     }
     if (id == ICON_MINE) {

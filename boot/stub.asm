@@ -102,6 +102,12 @@ cd_boot:
     int 0x10
     mov si, msg_cd
     call bios_puts
+    call boot_prompt
+    jnc .continue_cd
+    call boot_hard_disk
+    mov si, msg_no_hdd
+    call bios_puts
+.continue_cd:
 
     mov ah, 0x41
     mov bx, 0x55AA
@@ -275,12 +281,77 @@ read_lba:
     pop ax
     ret
 
+boot_prompt:
+    mov ax, 0x0003
+    int 0x10
+    mov si, msg_boot_prompt
+    call bios_puts
+    xor ax, ax
+    mov es, ax
+    mov eax, [es:0x046C]
+    mov [cs:boot_tick_start], eax
+.wait:
+    mov ah, 0x01
+    int 0x16
+    jnz .key
+    xor ax, ax
+    mov es, ax
+    mov eax, [es:0x046C]
+    sub eax, [cs:boot_tick_start]
+    cmp eax, 91
+    jb .wait
+    stc
+    ret
+.key:
+    xor ah, ah
+    int 0x16
+    clc
+    ret
+
+boot_hard_disk:
+    mov bx, 0x55AA
+    mov dl, 0x80
+    mov ah, 0x41
+    int 0x13
+    jc .failed
+    cmp bx, 0xAA55
+    jne .failed
+    test cx, 1
+    jz .failed
+
+    push ds
+    mov ax, cs
+    mov ds, ax
+    mov word [dap_pkt], 0x0010
+    mov word [dap_pkt + 2], 1
+    mov word [dap_pkt + 4], 0x7C00
+    mov word [dap_pkt + 6], 0
+    mov dword [dap_pkt + 8], 0
+    mov dword [dap_pkt + 12], 0
+    mov si, dap_pkt
+    mov dl, 0x80
+    mov ah, 0x42
+    int 0x13
+    pop ds
+    jc .failed
+
+    xor ax, ax
+    mov es, ax
+    cmp word [es:0x7DFE], 0xAA55
+    jne .failed
+    mov dl, 0x80
+    jmp 0x0000:0x7C00
+.failed:
+    stc
+    ret
+
 dap_pkt: times 16 db 0
 saved_drive: db 0
 saved_mode:  db 0
 saved_mark:  db 0
 read_status: db 0
 read_err:    db 0
+boot_tick_start: dd 0
 saved_lba:   dd 0
 saved_pos:   dd 0
 saved_len:   dd 0
@@ -369,7 +440,12 @@ put_hex8:
     pop ax
     ret
 
-msg_cd:  db "GeometricalOS: loading from CD...", 13, 10, 0
+msg_cd:  db "GeometricalOS: installer disk detected.", 13, 10, 0
+msg_boot_prompt:
+    db "Press any key to boot from CD/DVD.", 13, 10
+    db "Wait 5 seconds to boot from the hard drive.", 13, 10, 0
+msg_no_hdd:
+    db "No bootable hard drive found; starting the installer.", 13, 10, 0
 msg_ok:  db "GeometricalOS: CD image OK", 13, 10, 0
 msg_err: db "GeometricalOS: CD read failed, BIOS status ", 0
 
@@ -753,7 +829,7 @@ msg_font:  db "GeometricalOS: copying font", 13, 10, 0
 msg_video: db "GeometricalOS: setting VESA mode", 13, 10, 0
 failmsg:
     db "GeometricalOS needs a VESA linear framebuffer (640x480 or larger).", 13, 10
-    db "In VirtualBox use VBoxVGA or VBoxSVGA with 3D acceleration off.", 13, 10, 0
+    db "Use a video adapter that supports this display mode.", 13, 10, 0
 
 ; ---------------------------------------------------------------------------
 enable_a20:
@@ -808,14 +884,25 @@ fill_bootinfo:
     mov al, [es:0x3000 + 0x24]
     movzx eax, al
     mov [es:di + 48], eax
+    push es
+    push di
     mov ah, 0x88
     int 0x15
+    jc .no_extended_memory
     movzx eax, ax
+    jmp .store_extended_memory
+.no_extended_memory:
+    xor eax, eax
+.store_extended_memory:
+    pop di
+    pop es
     mov [es:di + 52], eax         ; extended memory KB
     mov dword [es:di + 56], 0x8000
     mov ax, [font_height]
     movzx eax, ax
     mov [es:di + 60], eax
+    movzx eax, byte [boot_drive]
+    mov [es:di + 64], eax
     mov ax, cs
     mov es, ax
     ret

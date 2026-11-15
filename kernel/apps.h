@@ -11,7 +11,7 @@ void app_mines_open(void);
 void app_files_open(void);
 void app_term_open(void);
 void app_sol_open(void);
-void app_browser_open(void);
+void app_snake_open(void);
 void app_control_open(void);
 void app_player_open(void);
 int login_screen(void);

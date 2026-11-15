@@ -92,7 +92,7 @@ static void safe_message(void) {
     const char *l1 = "It is now safe to turn off your computer.";
     int y = gfx_height() / 2 - 24;
     gfx_text((gfx_width() - gfx_text_width(l1)) / 2, y, l1, COL_WHITE, COL_BLACK);
-    const char *l2 = "You can close the VirtualBox window.";
+    const char *l2 = "Or press the computer's power button.";
     gfx_text((gfx_width() - gfx_text_width(l2)) / 2, y + 24, l2, COL_LTBLUE, COL_BLACK);
     const char *l3 = "Press ENTER to try powering off.";
     gfx_text((gfx_width() - gfx_text_width(l3)) / 2, y + 48, l3, COL_GRAY, COL_BLACK);
