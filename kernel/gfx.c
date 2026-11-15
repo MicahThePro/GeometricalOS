@@ -9,6 +9,8 @@ static int red_size, red_pos, green_size, green_pos, blue_size, blue_pos;
 static int fast32;
 static const uint8_t *font;
 static int font_h;
+static int font_fallback;
+extern const uint8_t font8x16_fallback[128][16];
 static int clip_x0, clip_y0, clip_x1, clip_y1;
 
 /* 16x16 arrow: 0 transparent, 1 black, 2 white. */
@@ -77,8 +79,15 @@ int gfx_init(void) {
     if (font_h < 8 || font_h > 16) font_h = 16;
     font = (const uint8_t *)(uintptr_t)bi->font_addr;
     int any = 0;
-    for (int i = 0; i < 256 * font_h; i++) if (font[i]) { any = 1; break; }
-    if (!any) return -2;
+    if (font && font_h >= 8) {
+        for (int i = 0; i < 256 * font_h; i++) if (font[i]) { any = 1; break; }
+    }
+    font_fallback = 0;
+    if (!any) {
+        font = &font8x16_fallback[0][0];
+        font_h = 16;
+        font_fallback = 1;
+    }
     back = (uint32_t *)0x200000;
     gfx_reset_clip();
     cur_saved = 0;
@@ -223,6 +232,7 @@ void gfx_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint32_t 
 }
 
 void gfx_char(int x, int y, unsigned char c, uint32_t fg, uint32_t bg, int opaque) {
+    if (font_fallback && c >= 128) c = ' ';
     const uint8_t *g = font + (unsigned)c * (unsigned)font_h;
     for (int row = 0; row < font_h; row++) {
         uint8_t bits = g[row];
