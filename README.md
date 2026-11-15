@@ -27,6 +27,7 @@ It is not Linux. It is a 32-bit freestanding kernel with its own bootloader, a s
 | ![Minesweeper](screenshots/09-minesweeper.png) | ![File Manager](screenshots/10-file-manager.png) |
 | ![Terminal](screenshots/11-terminal.png) | ![Solitaire](screenshots/12-solitaire.png) |
 | ![Browser](screenshots/13-browser.png) | ![ipconfig](screenshots/14-ipconfig.png) |
+| ![example.com](screenshots/17-example.png) | ![httpforever.com](screenshots/16-httpforever.png) |
 
 The boot splash is a static geometric logo (a square, a circle, and a triangle) with the name GeometricalOS. It stays up for a couple of seconds, then the logon screen appears.
 

@@ -141,7 +141,21 @@ int ata_write(uint32_t lba, const void *buf, uint32_t count) {
         in += n * 512;
     }
     if (wait_not_busy()) return -3;
-    outb(ATA_IO + 7, 0xE7); /* flush cache */
-    if (wait_not_busy()) return -4;
+    if (ata_flush()) return -4;
+    return 0;
+}
+
+int ata_flush(void) {
+    if (wait_not_busy()) return -1;
+    outb(ATA_IO + 6, 0xE0);
+    inb(ATA_CTRL);
+    inb(ATA_CTRL);
+    outb(ATA_IO + 7, 0xE7); /* FLUSH CACHE */
+    if (wait_not_busy()) return -1;
+    uint8_t st = inb(ATA_IO + 7);
+    if (st & 0x01) {
+        outb(ATA_IO + 7, 0xEA); /* FLUSH CACHE EXT, if the drive understands it */
+        wait_not_busy();
+    }
     return 0;
 }

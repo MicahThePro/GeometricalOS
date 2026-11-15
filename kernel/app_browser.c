@@ -105,7 +105,11 @@ static void html_to_runs(const char *html) {
             continue;
         }
         if (skip) { p++; continue; }
-        char ch = *p++;
+        unsigned char ch = (unsigned char)*p++;
+        if (ch >= 0x80) {
+            while (*p && ((unsigned char)*p & 0xC0) == 0x80) p++;
+            ch = ' ';
+        }
         if (ch == '&') {
             if (strncmp(p, "amp;", 4) == 0) { ch = '&'; p += 4; }
             else if (strncmp(p, "lt;", 3) == 0) { ch = '<'; p += 3; }
@@ -151,11 +155,23 @@ static void layout(int width) {
     content_h = y + fh + 8;
 }
 
+static void show_status(const char *s) {
+    strncpy(status, s, sizeof(status));
+    status[sizeof(status) - 1] = 0;
+    if (!win) return;
+    int cx, cy, cw, ch;
+    window_client(win, &cx, &cy, &cw, &ch);
+    gfx_fill(cx, cy + ch - 18, cw, 18, COL_GRAY);
+    gfx_text(cx + 6, cy + ch - 16, status, COL_BLACK, COL_GRAY);
+    gfx_present();
+}
+
 static void go(const char *target) {
     ensure();
     strncpy(url, target, sizeof(url));
     url[sizeof(url) - 1] = 0;
-    strcpy(status, "Loading...");
+    show_status("Resolving...");
+    http_set_progress(show_status);
     int len = 0, code = 0;
     char finalu[120];
     finalu[0] = 0;
@@ -278,5 +294,6 @@ void app_browser_open(void) {
     if (ww > gfx_width() - 10) ww = gfx_width() - 10;
     if (wh > gfx_height() - 10) wh = gfx_height() - 10;
     win = gui_create("Web Browser", ww, wh, ICON_WEB, browser_event, &win);
+    if (win) win->text_keys = 1;
     serial_write("APP: BROWSER\n");
 }

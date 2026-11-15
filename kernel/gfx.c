@@ -1,6 +1,7 @@
 #include "gfx.h"
 #include "bootinfo.h"
 #include "io.h"
+#include "input.h"
 
 static int sw, sh, pitch, bpp;
 static uint8_t *lfb;
@@ -325,15 +326,93 @@ void gfx_sunken(int x, int y, int w, int h, uint32_t face) {
     }
 }
 
+static struct { int x, y, w, h; } btns[48];
+static int nbtns;
+static int arm_on, arm_x, arm_y, arm_w, arm_h;
+static int foc_on, foc_x, foc_y, foc_w, foc_h;
+
+void gfx_buttons_begin(void) { nbtns = 0; }
+
+static int same_btn(int x, int y, int w, int h, int x2, int y2, int w2, int h2) {
+    return x == x2 && y == y2 && w == w2 && h == h2;
+}
+
 void gfx_button(int x, int y, int w, int h, const char *label, int pressed) {
-    if (pressed) gfx_sunken(x, y, w, h, COL_GRAY);
+    if (nbtns < 48) {
+        btns[nbtns].x = x; btns[nbtns].y = y; btns[nbtns].w = w; btns[nbtns].h = h;
+        nbtns++;
+    }
+    int inside = mouse_x >= x && mouse_x < x + w && mouse_y >= y && mouse_y < y + h;
+    int hot = arm_on && same_btn(x, y, w, h, arm_x, arm_y, arm_w, arm_h) && inside && (mouse_buttons & 1);
+    int down = pressed || hot;
+    if (down) gfx_sunken(x, y, w, h, COL_GRAY);
     else gfx_raised(x, y, w, h, COL_GRAY);
+    int focused = foc_on && same_btn(x, y, w, h, foc_x, foc_y, foc_w, foc_h);
+    if (focused && w > 8 && h > 8)
+        gfx_rect(x + 3, y + 3, w - 6, h - 6, COL_BLACK);
     if (!label) return;
     int tw = gfx_text_width(label);
     int tx = x + (w - tw) / 2;
     int ty = y + (h - font_h) / 2;
-    if (pressed) { tx++; ty++; }
+    if (down) { tx++; ty++; }
     gfx_text_fg(tx, ty, label, COL_BLACK);
+}
+
+int gfx_button_hit(int x, int y, int *bx, int *by, int *bw, int *bh) {
+    for (int i = nbtns - 1; i >= 0; i--) {
+        if (x >= btns[i].x && x < btns[i].x + btns[i].w && y >= btns[i].y && y < btns[i].y + btns[i].h) {
+            if (bx) *bx = btns[i].x;
+            if (by) *by = btns[i].y;
+            if (bw) *bw = btns[i].w;
+            if (bh) *bh = btns[i].h;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void gfx_button_arm(int x, int y, int w, int h) {
+    arm_on = 1; arm_x = x; arm_y = y; arm_w = w; arm_h = h;
+    foc_on = 1; foc_x = x; foc_y = y; foc_w = w; foc_h = h;
+}
+void gfx_button_clear_arm(void) { arm_on = 0; }
+int gfx_button_armed(void) { return arm_on; }
+int gfx_button_arm_contains(int x, int y) {
+    return arm_on && x >= arm_x && x < arm_x + arm_w && y >= arm_y && y < arm_y + arm_h;
+}
+void gfx_button_focus(int x, int y, int w, int h) {
+    foc_on = 1; foc_x = x; foc_y = y; foc_w = w; foc_h = h;
+}
+int gfx_button_focus_rect(int *x, int *y, int *w, int *h) {
+    if (!foc_on) return 0;
+    if (x) *x = foc_x;
+    if (y) *y = foc_y;
+    if (w) *w = foc_w;
+    if (h) *h = foc_h;
+    return 1;
+}
+
+void gfx_slider(int x, int y, int w, int val, int lo, int hi, int focused) {
+    if (w < 40) w = 40;
+    if (hi <= lo) hi = lo + 1;
+    if (val < lo) val = lo;
+    if (val > hi) val = hi;
+    int track_y = y + 8;
+    gfx_sunken(x + 8, track_y, w - 16, 6, COL_WHITE);
+    int span = w - 28;
+    int thumb = x + 8 + (val - lo) * span / (hi - lo);
+    gfx_raised(thumb, y, 14, 22, COL_GRAY);
+    if (focused) gfx_rect(thumb + 2, y + 2, 10, 18, COL_BLACK);
+}
+
+int gfx_slider_value(int x, int track_x, int track_w, int lo, int hi) {
+    if (hi <= lo) return lo;
+    int span = track_w - 28;
+    if (span < 1) span = 1;
+    int rel = x - (track_x + 8);
+    if (rel < 0) rel = 0;
+    if (rel > span) rel = span;
+    return lo + rel * (hi - lo) / span;
 }
 
 void gfx_blit_indexed(int dx, int dy, const uint8_t *src, int bw, int bh,

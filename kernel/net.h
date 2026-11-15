@@ -20,5 +20,6 @@ int net_ping(uint32_t ip, int *ticks_out);
 /* Fetch a URL into body. Follows HTTP redirects. Returns 0 on a response. */
 int http_get(const char *url, char *body, int max, int *out_len, int *status,
              char *final_url, int url_max);
+void http_set_progress(void (*fn)(const char *msg));
 
 #endif

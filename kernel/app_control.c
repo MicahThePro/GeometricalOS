@@ -1,16 +1,20 @@
 #include "apps.h"
 #include "gui.h"
 #include "gfx.h"
+#include "input.h"
 #include "settings.h"
 #include "wallpaper.h"
 #include "rtc.h"
 #include "net.h"
+#include "sound.h"
 #include "io.h"
 #include "serial.h"
 
 static Window *panel;
 static Window *page;
 static int which;
+static int drag_slider = -1;
+static char sound_msg[64];
 
 static const char *icons[] = {"Color", "Desktop", "Mouse", "Date/Time", "Sound", "Network"};
 
@@ -31,6 +35,10 @@ static void panel_event(Window *w, Event *e) {
             gfx_fill(cx + x + 6, cy + y + 6, 24, 24, settings_title_color());
             gfx_text(cx + x + 4, cy + y + 42, icons[i], COL_BLACK, COL_GRAY);
         }
+        return;
+    }
+    if (e->type == EVT_KEY && e->code >= '1' && e->code <= '6') {
+        open_page(e->code - '1');
         return;
     }
     if (e->type == EVT_DOWN) {
@@ -56,18 +64,18 @@ static void page_event(Window *w, Event *e) {
             static const char *names[] = {"Solid", "Tiles", "Stripes", "Diamonds"};
             for (int i = 0; i < 4; i++)
                 gfx_button(cx + 16, cy + 36 + i * 28, 140, 24, names[i], wall_get() == i);
-            gfx_text(cx + 16, cy + 160, settings_saver_on() ? "Screensaver: on" : "Screensaver: off", COL_BLACK, COL_GRAY);
-            gfx_button(cx + 16, cy + 182, 80, 24, "Toggle", 0);
-            gfx_button(cx + 104, cy + 182, 70, 24, "Shorter", 0);
-            gfx_button(cx + 180, cy + 182, 70, 24, "Longer", 0);
+            gfx_button(cx + 16, cy + 156, 100, 24, settings_saver_on() ? "Saver: on" : "Saver: off", 0);
+            gfx_text(cx + 130, cy + 160, "Wait", COL_BLACK, COL_GRAY);
+            gfx_slider(cx + 16, cy + 188, cw - 32, settings_saver_seconds(), 5, 300, drag_slider == 0);
+            gfx_text(cx + 16, cy + 214, "5s", COL_BLACK, COL_GRAY);
+            gfx_text(cx + cw - 40, cy + 214, "5 min", COL_BLACK, COL_GRAY);
         } else if (which == 2) {
-            gfx_text(cx + 16, cy + 40, "Pointer speed", COL_BLACK, COL_GRAY);
-            gfx_button(cx + 16, cy + 64, 70, 24, "Slower", 0);
-            gfx_button(cx + 96, cy + 64, 70, 24, "Faster", 0);
-            gfx_text(cx + 16, cy + 104, "Double-click", COL_BLACK, COL_GRAY);
-            gfx_button(cx + 16, cy + 128, 70, 24, "Faster", 0);
-            gfx_button(cx + 96, cy + 128, 70, 24, "Slower", 0);
-            gfx_button(cx + 16, cy + 170, cw - 32, 26, settings_swap_buttons() ? "Buttons: swapped" : "Buttons: normal", 0);
+            gfx_text(cx + 16, cy + 36, "Slow", COL_BLACK, COL_GRAY);
+            gfx_slider(cx + 16, cy + 52, cw - 32, settings_mouse_speed(), 1, 4, drag_slider == 0);
+            gfx_text(cx + cw - 48, cy + 36, "Fast", COL_BLACK, COL_GRAY);
+            gfx_text(cx + 16, cy + 88, "Double-click", COL_BLACK, COL_GRAY);
+            gfx_slider(cx + 16, cy + 108, cw - 32, settings_dbl_ticks(), 15, 90, drag_slider == 1);
+            gfx_button(cx + 16, cy + 150, cw - 32, 26, settings_swap_buttons() ? "Buttons: swapped" : "Buttons: normal", 0);
         } else if (which == 3) {
             RtcTime t;
             rtc_read(&t);
@@ -82,10 +90,12 @@ static void page_event(Window *w, Event *e) {
             gfx_text(cx + 16, cy + 48, b, COL_BLACK, COL_GRAY);
             gfx_text(cx + 16, cy + 80, "The clock follows the virtual machine.", COL_BLACK, COL_GRAY);
         } else if (which == 4) {
-            gfx_button(cx + 16, cy + 40, cw - 32, 26, settings_sound_on() ? "Sounds: on" : "Sounds: off", 0);
-            gfx_text(cx + 16, cy + 80, "Volume", COL_BLACK, COL_GRAY);
-            gfx_button(cx + 16, cy + 104, 70, 24, "Quieter", 0);
-            gfx_button(cx + 96, cy + 104, 70, 24, "Louder", 0);
+            gfx_button(cx + 16, cy + 36, 120, 26, settings_sound_on() ? "Sounds: on" : "Sounds: off", 0);
+            gfx_button(cx + 148, cy + 36, 80, 26, "Test", 0);
+            gfx_text(cx + 16, cy + 74, "Quiet", COL_BLACK, COL_GRAY);
+            gfx_slider(cx + 16, cy + 90, cw - 32, settings_volume(), 0, 15, drag_slider == 0);
+            gfx_text(cx + cw - 48, cy + 74, "Loud", COL_BLACK, COL_GRAY);
+            gfx_text(cx + 16, cy + 130, sound_msg[0] ? sound_msg : sound_detect_text(), COL_BLACK, COL_GRAY);
         } else if (which == 5) {
             if (!net_ready()) gfx_text(cx + 16, cy + 40, "Network is not configured yet.", COL_BLACK, COL_GRAY);
             else {
@@ -108,6 +118,32 @@ static void page_event(Window *w, Event *e) {
         }
         return;
     }
+    if (e->type == EVT_UP) { drag_slider = -1; return; }
+    if (e->type == EVT_KEY && which == 0 && (e->code == 'b' || e->code == 'B')) {
+        settings_set_scheme(1);
+        return;
+    }
+    if (e->type == EVT_KEY && drag_slider < 0) {
+        int dir = 0;
+        if (e->code == KEY_LEFT) dir = -1;
+        else if (e->code == KEY_RIGHT) dir = 1;
+        else if (e->code == KEY_HOME) dir = -100;
+        else if (e->code == KEY_END) dir = 100;
+        if (!dir) return;
+        if (which == 1) settings_set_saver(settings_saver_on(), settings_saver_seconds() + (dir < 0 ? -15 : 15));
+        else if (which == 2) settings_set_mouse(settings_mouse_speed() + (dir < 0 ? -1 : 1), settings_dbl_ticks(), settings_swap_buttons());
+        else if (which == 4) settings_set_sound(settings_sound_on(), settings_volume() + dir);
+        return;
+    }
+    if (e->type == EVT_MOVE && drag_slider >= 0) {
+        int val = gfx_slider_value(e->x + 0, 16, cw - 32, 0, 1);
+        (void)val;
+        if (which == 1) settings_set_saver(settings_saver_on(), gfx_slider_value(e->x, 16, cw - 32, 5, 300));
+        else if (which == 2 && drag_slider == 0) settings_set_mouse(gfx_slider_value(e->x, 16, cw - 32, 1, 4), settings_dbl_ticks(), settings_swap_buttons());
+        else if (which == 2 && drag_slider == 1) settings_set_mouse(settings_mouse_speed(), gfx_slider_value(e->x, 16, cw - 32, 15, 90), settings_swap_buttons());
+        else if (which == 4) settings_set_sound(settings_sound_on(), gfx_slider_value(e->x, 16, cw - 32, 0, 15));
+        return;
+    }
     if (e->type != EVT_DOWN) return;
     if (which == 0) {
         int i = (e->y - 36) / 32;
@@ -117,28 +153,33 @@ static void page_event(Window *w, Event *e) {
         if (i >= 0 && i < 4 && e->y < 36 + 4 * 28 && e->x >= 16 && e->x < 160) {
             wall_set(i); gui_invalidate();
         }
-        if (e->y >= 182 && e->y < 206) {
-            if (e->x >= 16 && e->x < 96) settings_set_saver(!settings_saver_on(), settings_saver_seconds());
-            else if (e->x >= 104 && e->x < 174) settings_set_saver(settings_saver_on(), settings_saver_seconds() - 10);
-            else if (e->x >= 180 && e->x < 250) settings_set_saver(settings_saver_on(), settings_saver_seconds() + 15);
-            gui_invalidate();
+        if (e->y >= 156 && e->y < 180 && e->x >= 16 && e->x < 116)
+            settings_set_saver(!settings_saver_on(), settings_saver_seconds());
+        if (e->y >= 188 && e->y < 214) {
+            drag_slider = 0;
+            settings_set_saver(settings_saver_on(), gfx_slider_value(e->x, 16, cw - 32, 5, 300));
         }
+        gui_invalidate();
     } else if (which == 2) {
-        if (e->y >= 64 && e->y < 88) {
-            if (e->x >= 16 && e->x < 86) settings_set_mouse(settings_mouse_speed() - 1, settings_dbl_ticks(), settings_swap_buttons());
-            else if (e->x >= 96 && e->x < 166) settings_set_mouse(settings_mouse_speed() + 1, settings_dbl_ticks(), settings_swap_buttons());
-        } else if (e->y >= 128 && e->y < 152) {
-            if (e->x >= 16 && e->x < 86) settings_set_mouse(settings_mouse_speed(), settings_dbl_ticks() - 10, settings_swap_buttons());
-            else if (e->x >= 96 && e->x < 166) settings_set_mouse(settings_mouse_speed(), settings_dbl_ticks() + 10, settings_swap_buttons());
-        } else if (e->y >= 170 && e->y < 196) {
+        if (e->y >= 52 && e->y < 76) {
+            drag_slider = 0;
+            settings_set_mouse(gfx_slider_value(e->x, 16, cw - 32, 1, 4), settings_dbl_ticks(), settings_swap_buttons());
+        } else if (e->y >= 108 && e->y < 132) {
+            drag_slider = 1;
+            settings_set_mouse(settings_mouse_speed(), gfx_slider_value(e->x, 16, cw - 32, 15, 90), settings_swap_buttons());
+        } else if (e->y >= 150 && e->y < 176) {
             settings_set_mouse(settings_mouse_speed(), settings_dbl_ticks(), !settings_swap_buttons());
         }
         gui_invalidate();
     } else if (which == 4) {
-        if (e->y >= 40 && e->y < 66) settings_set_sound(!settings_sound_on(), settings_volume());
-        else if (e->y >= 104 && e->y < 128) {
-            if (e->x >= 16 && e->x < 86) settings_set_sound(settings_sound_on(), settings_volume() - 2);
-            else if (e->x >= 96 && e->x < 166) settings_set_sound(settings_sound_on(), settings_volume() + 2);
+        if (e->y >= 36 && e->y < 62 && e->x >= 16 && e->x < 136)
+            settings_set_sound(!settings_sound_on(), settings_volume());
+        else if (e->y >= 36 && e->y < 62 && e->x >= 148 && e->x < 228) {
+            strncpy(sound_msg, sound_detect_text(), sizeof(sound_msg));
+            sound_test();
+        } else if (e->y >= 90 && e->y < 114) {
+            drag_slider = 0;
+            settings_set_sound(settings_sound_on(), gfx_slider_value(e->x, 16, cw - 32, 0, 15));
         }
         gui_invalidate();
     } else if (which == 5 && e->y >= 130 && e->y < 156 && e->x >= 16 && e->x < 156) {

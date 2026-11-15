@@ -238,6 +238,7 @@ void app_term_open(void) {
     if (ww > gfx_width() - 16) ww = gfx_width() - 16;
     if (wh > gfx_height() - 16) wh = gfx_height() - 16;
     win = gui_create("Terminal", ww, wh, ICON_TERM, term_event, &win);
+    if (win) win->text_keys = 1;
     if (nrows == 0) {
         term_print("GeometricalOS Terminal");
         term_print("Type help and press ENTER.");
