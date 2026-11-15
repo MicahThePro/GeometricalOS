@@ -41,8 +41,10 @@ static void open_sel(void) {
     const char *name = fs_name(id);
     int n = (int)strlen(name);
     int txt = n >= 4 && strcasecmp(name + n - 4, ".TXT") == 0;
+    int gim = n >= 4 && strcasecmp(name + n - 4, ".GIM") == 0;
     if (txt) app_notepad_load(id);
-    else gui_dialog("File Manager", "Only .TXT files open in Notepad.", "OK", 0, 0);
+    else if (gim) app_paint_load(id);
+    else gui_dialog("File Manager", "Open .TXT in Notepad or .GIM in Paint.", "OK", 0, 0);
 }
 
 static void files_event(Window *w, Event *e) {

@@ -33,9 +33,27 @@ static const uint8_t cursor_bits[16][16] = {
     {0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0},
 };
 
-static int cur_saved;
-static int cur_sx, cur_sy;
-static uint8_t cur_bg[16 * 16 * 4];
+static int cur_x = -32, cur_y = -32;
+static int shown_x = -32, shown_y = -32;
+static int dirty;
+static int dx0, dy0, dx1, dy1;
+
+static void mark_dirty(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0 || sw <= 0 || sh <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > sw) w = sw - x;
+    if (y + h > sh) h = sh - y;
+    if (w <= 0 || h <= 0) return;
+    if (!dirty) {
+        dx0 = x; dy0 = y; dx1 = x + w; dy1 = y + h; dirty = 1;
+        return;
+    }
+    if (x < dx0) dx0 = x;
+    if (y < dy0) dy0 = y;
+    if (x + w > dx1) dx1 = x + w;
+    if (y + h > dy1) dy1 = y + h;
+}
 
 int gfx_width(void) { return sw; }
 int gfx_height(void) { return sh; }
@@ -90,7 +108,8 @@ int gfx_init(void) {
     }
     back = (uint32_t *)0x200000;
     gfx_reset_clip();
-    cur_saved = 0;
+    cur_x = cur_y = shown_x = shown_y = -32;
+    dirty = 0;
     return 0;
 }
 
@@ -117,6 +136,7 @@ void gfx_reset_clip(void) {
 void gfx_pixel(int x, int y, uint32_t color) {
     if (x < clip_x0 || y < clip_y0 || x >= clip_x1 || y >= clip_y1) return;
     back[(uint32_t)y * (uint32_t)sw + (uint32_t)x] = color;
+    mark_dirty(x, y, 1, 1);
 }
 
 void gfx_clear(uint32_t color) {
@@ -134,6 +154,7 @@ void gfx_fill(int x, int y, int w, int h, uint32_t color) {
         uint32_t *row = back + (uint32_t)yy * (uint32_t)sw;
         for (int xx = x0; xx < x1; xx++) row[xx] = color;
     }
+    mark_dirty(x0, y0, x1 - x0, y1 - y0);
 }
 
 void gfx_hline(int x, int y, int w, uint32_t color) {
@@ -327,6 +348,7 @@ void gfx_blit_indexed(int dx, int dy, const uint8_t *src, int bw, int bh,
         if (dx + bw > clip_x1) x1 = clip_x1 - dx;
         for (int x = x0; x < x1; x++) row[dx + x] = pal[srow[x] & 15];
     }
+    mark_dirty(dx, dy, bw, bh);
 }
 
 void gfx_logo(int cx, int cy, int scale) {
@@ -364,96 +386,76 @@ static void put_front(int x, int y, uint32_t rgb) {
     }
 }
 
-static uint32_t get_front_raw(int x, int y, uint8_t *raw4) {
-    uint8_t *src = lfb + (uint32_t)y * (uint32_t)pitch + (uint32_t)x * (bpp / 8);
-    int n = bpp / 8;
-    for (int i = 0; i < 4; i++) raw4[i] = (i < n) ? src[i] : 0;
+static int cursor_overlay(int x, int y, uint32_t *color) {
+    int cx = x - cur_x;
+    int cy = y - cur_y;
+    if ((unsigned)cx >= 16u || (unsigned)cy >= 16u) return 0;
+    uint8_t b = cursor_bits[cy][cx];
+    if (b == 1) { *color = COL_BLACK; return 1; }
+    if (b == 2) { *color = COL_WHITE; return 1; }
     return 0;
 }
 
-static void put_front_raw(int x, int y, const uint8_t *raw4) {
-    uint8_t *dst = lfb + (uint32_t)y * (uint32_t)pitch + (uint32_t)x * (bpp / 8);
-    int n = bpp / 8;
-    for (int i = 0; i < n; i++) dst[i] = raw4[i];
+/* One write per pixel: the back buffer, with the cursor composited on top.
+ * The front buffer is never cleared and the cursor is never erased first.
+ */
+static void blit_box(int x0, int y0, int x1, int y1) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > sw) x1 = sw;
+    if (y1 > sh) y1 = sh;
+    if (x0 >= x1 || y0 >= y1) return;
+    for (int y = y0; y < y1; y++) {
+        uint32_t *row = back + (uint32_t)y * (uint32_t)sw;
+        for (int x = x0; x < x1; x++) {
+            uint32_t c = row[x];
+            uint32_t over;
+            if (cursor_overlay(x, y, &over)) c = over;
+            put_front(x, y, c);
+        }
+    }
 }
 
 void gfx_present(void) {
-    cursor_restore();
-    if (fast32 && pitch == sw * 4) {
-        uint32_t *d = (uint32_t *)lfb;
-        uint32_t n = (uint32_t)sw * (uint32_t)sh;
-        for (uint32_t i = 0; i < n; i++) d[i] = back[i];
+    if (!dirty) {
+        if (shown_x != cur_x || shown_y != cur_y)
+            blit_box(cur_x, cur_y, cur_x + 16, cur_y + 16);
+        shown_x = cur_x;
+        shown_y = cur_y;
         return;
     }
-    for (int y = 0; y < sh; y++) {
-        uint32_t *row = back + (uint32_t)y * (uint32_t)sw;
-        if (bpp == 32) {
-            uint8_t *dst = lfb + (uint32_t)y * (uint32_t)pitch;
-            for (int x = 0; x < sw; x++) {
-                uint32_t p = fast32 ? row[x] : pack_color(row[x]);
-                dst[x * 4 + 0] = (uint8_t)p;
-                dst[x * 4 + 1] = (uint8_t)(p >> 8);
-                dst[x * 4 + 2] = (uint8_t)(p >> 16);
-                dst[x * 4 + 3] = (uint8_t)(p >> 24);
-            }
-        } else if (bpp == 24) {
-            uint8_t *dst = lfb + (uint32_t)y * (uint32_t)pitch;
-            for (int x = 0; x < sw; x++) {
-                uint32_t p = pack_color(row[x]);
-                dst[x * 3 + 0] = (uint8_t)p;
-                dst[x * 3 + 1] = (uint8_t)(p >> 8);
-                dst[x * 3 + 2] = (uint8_t)(p >> 16);
-            }
-        } else {
-            uint8_t *dst = lfb + (uint32_t)y * (uint32_t)pitch;
-            for (int x = 0; x < sw; x++) {
-                uint32_t p = pack_color(row[x]);
-                dst[x * 2 + 0] = (uint8_t)p;
-                dst[x * 2 + 1] = (uint8_t)(p >> 8);
-            }
-        }
-    }
+    blit_box(dx0, dy0, dx1, dy1);
+    if (cur_x < dx0 || cur_y < dy0 || cur_x + 16 > dx1 || cur_y + 16 > dy1)
+        blit_box(cur_x, cur_y, cur_x + 16, cur_y + 16);
+    if (shown_x != cur_x || shown_y != cur_y)
+        blit_box(shown_x, shown_y, shown_x + 16, shown_y + 16);
+    shown_x = cur_x;
+    shown_y = cur_y;
+    dirty = 0;
 }
 
 void cursor_invalidate(void) {
-    cur_saved = 0;
+    shown_x = shown_y = -64;
 }
 
 void cursor_restore(void) {
-    if (!cur_saved) return;
-    for (int y = 0; y < 16; y++) {
-        int py = cur_sy + y;
-        if ((unsigned)py >= (unsigned)sh) continue;
-        for (int x = 0; x < 16; x++) {
-            int px = cur_sx + x;
-            if ((unsigned)px >= (unsigned)sw) continue;
-            put_front_raw(px, py, &cur_bg[(y * 16 + x) * 4]);
-        }
-    }
-    cur_saved = 0;
+    /* The cursor lives in the same blit as the scene. There is no separate erase. */
 }
 
 void cursor_draw(int x, int y) {
-    cursor_restore();
     if (x < 0) x = 0;
     if (y < 0) y = 0;
-    if (x > sw - 1) x = sw - 1;
-    if (y > sh - 1) y = sh - 1;
-    cur_sx = x;
-    cur_sy = y;
-    for (int cy = 0; cy < 16; cy++) {
-        int py = y + cy;
-        for (int cx = 0; cx < 16; cx++) {
-            int px = x + cx;
-            uint8_t *slot = &cur_bg[(cy * 16 + cx) * 4];
-            if ((unsigned)px < (unsigned)sw && (unsigned)py < (unsigned)sh)
-                get_front_raw(px, py, slot);
-            else
-                slot[0] = slot[1] = slot[2] = slot[3] = 0;
-            uint8_t b = cursor_bits[cy][cx];
-            if (b == 1) put_front(px, py, COL_BLACK);
-            else if (b == 2) put_front(px, py, COL_WHITE);
-        }
-    }
-    cur_saved = 1;
+    if (sw > 0 && x > sw - 1) x = sw - 1;
+    if (sh > 0 && y > sh - 1) y = sh - 1;
+    if (x == cur_x && y == cur_y && shown_x == x && shown_y == y) return;
+    int ox = shown_x, oy = shown_y;
+    cur_x = x;
+    cur_y = y;
+    /* Draw the cursor in its new place first, then repair the old place.
+     * Overlapping pixels stay covered because the second blit uses the new position.
+     */
+    blit_box(x, y, x + 16, y + 16);
+    if (ox != x || oy != y) blit_box(ox, oy, ox + 16, oy + 16);
+    shown_x = x;
+    shown_y = y;
 }

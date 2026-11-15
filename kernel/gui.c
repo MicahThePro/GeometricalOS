@@ -4,11 +4,14 @@
 #include "rtc.h"
 #include "wallpaper.h"
 #include "io.h"
+#include "fs.h"
+#include "settings.h"
+#include "sound.h"
 
 #define BORDER 3
 #define TITLE_H 18
 #define MENU_H 18
-#define MAXW 14
+#define MAXW 20
 
 static Window wins[MAXW];
 static Window *focused;
@@ -143,6 +146,7 @@ static void send(Window *w, Event *e) {
 
 static void request_close(Window *w) {
     if (!w || !w->used) return;
+    if (w->ask_close && !w->ask_close(w)) return;
     if (w->keep) {
         Event e;
         memset(&e, 0, sizeof(e));
@@ -221,7 +225,7 @@ static void glyph_box(int x, int y, int pressed) {
 }
 
 static void paint_frame(Window *w) {
-    uint32_t title_bg = (w == focused) ? COL_NAVY : COL_DKGRAY;
+    uint32_t title_bg = (w == focused) ? settings_title_color() : COL_DKGRAY;
     gfx_raised(w->x, w->y, w->w, w->h, COL_GRAY);
     int tx = w->x + BORDER;
     int ty = w->y + BORDER;
@@ -360,7 +364,168 @@ static struct {
     char names[48][28];
 } pick;
 
-static int modal_active(void) { return dialog.on || prompt.on || pick.on; }
+static struct {
+    int on, result, save, count, sel, scroll, namelen;
+    uint16_t dir;
+    char title[40];
+    char name[28];
+    int ids[40];
+    int isdir[40];
+    char labels[40][28];
+} filedlg;
+
+static void button_row(int x, int y, int w, int n, const char labels[][16], int *bx, int *bw);
+
+static int modal_active(void) {
+    return dialog.on || prompt.on || pick.on || filedlg.on;
+}
+
+static void file_refresh(void) {
+    filedlg.count = 0;
+    filedlg.sel = 0;
+    filedlg.scroll = 0;
+    if (filedlg.dir != FS_ROOT && filedlg.count < 40) {
+        filedlg.ids[filedlg.count] = -1;
+        filedlg.isdir[filedlg.count] = 1;
+        strncpy(filedlg.labels[filedlg.count], "..", 28);
+        filedlg.count++;
+    }
+    int ids[64];
+    int n = fs_list(filedlg.dir, ids, 64);
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < n && filedlg.count < 40; i++) {
+            int dir = fs_is_dir(ids[i]);
+            if (pass == 0 && !dir) continue;
+            if (pass == 1 && dir) continue;
+            filedlg.ids[filedlg.count] = ids[i];
+            filedlg.isdir[filedlg.count] = dir;
+            strncpy(filedlg.labels[filedlg.count], fs_name(ids[i]), 28);
+            filedlg.count++;
+        }
+    }
+}
+
+static void file_geom(int *x, int *y, int *w, int *h) {
+    *w = 420;
+    *h = 320;
+    if (*w > gfx_width() - 16) *w = gfx_width() - 16;
+    if (*h > gfx_height() - 16) *h = gfx_height() - 16;
+    *x = (gfx_width() - *w) / 2;
+    *y = (gfx_height() - *h) / 2;
+}
+
+static void paint_filedlg(void) {
+    int x, y, w, h;
+    file_geom(&x, &y, &w, &h);
+    gfx_raised(x, y, w, h, COL_GRAY);
+    gfx_fill(x + 3, y + 3, w - 6, TITLE_H, COL_NAVY);
+    gfx_text(x + 10, y + 4, filedlg.title, COL_WHITE, COL_NAVY);
+    gfx_text(x + 12, y + 28, filedlg.dir == FS_ROOT ? "Folder: \\" : "Folder", COL_BLACK, COL_GRAY);
+    int lx = x + 12, ly = y + 48, lw = w - 24, lh = h - 130;
+    gfx_sunken(lx, ly, lw, lh, COL_WHITE);
+    int rows = (lh - 8) / 18;
+    if (rows < 1) rows = 1;
+    if (filedlg.sel < filedlg.scroll) filedlg.scroll = filedlg.sel;
+    if (filedlg.sel >= filedlg.scroll + rows) filedlg.scroll = filedlg.sel - rows + 1;
+    for (int i = 0; i < rows; i++) {
+        int idx = filedlg.scroll + i;
+        if (idx >= filedlg.count) break;
+        int iy = ly + 4 + i * 18;
+        int hot = (idx == filedlg.sel);
+        if (hot) gfx_fill(lx + 2, iy, lw - 4, 18, COL_NAVY);
+        char row[32];
+        strncpy(row, filedlg.labels[idx], 24);
+        row[24] = 0;
+        if (filedlg.isdir[idx] && strcmp(row, "..") != 0) {
+            int L = (int)strlen(row);
+            if (L < 22) { row[L] = ' '; row[L + 1] = 0; }
+        }
+        gfx_text(lx + 6, iy + 1, row, hot ? COL_WHITE : COL_BLACK, hot ? COL_NAVY : COL_WHITE);
+        if (filedlg.isdir[idx])
+            gfx_text(lx + lw - 52, iy + 1, "<DIR>", hot ? COL_YELLOW : COL_NAVY, hot ? COL_NAVY : COL_WHITE);
+    }
+    gfx_text(x + 12, y + h - 72, "File name:", COL_BLACK, COL_GRAY);
+    gfx_sunken(x + 100, y + h - 76, w - 116, 22, COL_WHITE);
+    gfx_text(x + 104, y + h - 72, filedlg.name, COL_BLACK, COL_WHITE);
+    int bx[2], bw;
+    char labels[2][16];
+    strncpy(labels[0], filedlg.save ? "OK" : "Open", 16);
+    strncpy(labels[1], "Cancel", 16);
+    button_row(x, y + h - 36, w, 2, labels, bx, &bw);
+}
+
+static int file_click(int mx, int my, int *row_out, int dbl) {
+    int x, y, w, h;
+    file_geom(&x, &y, &w, &h);
+    int bw0 = 88, gap = 10, total = 2 * bw0 + gap;
+    int sx = x + (w - total) / 2;
+    int by = y + h - 36;
+    for (int i = 0; i < 2; i++) {
+        int bx = sx + i * (bw0 + gap);
+        if (mx >= bx && mx < bx + bw0 && my >= by && my < by + 24) return i == 0 ? 1 : 0;
+    }
+    int lx = x + 12, ly = y + 48, lw = w - 24, lh = h - 130;
+    if (mx >= lx && mx < lx + lw && my >= ly && my < ly + lh) {
+        int rows = (lh - 8) / 18;
+        int rel = (my - (ly + 4)) / 18;
+        int idx = filedlg.scroll + rel;
+        if (rel >= 0 && rel < rows && idx >= 0 && idx < filedlg.count) {
+            if (row_out) *row_out = idx;
+            if (dbl && filedlg.isdir[idx]) return 3;
+            if (dbl) return 1;
+            return 2;
+        }
+    }
+    return -1;
+}
+
+int gui_file(const char *title, int save, uint16_t *dir, char *name, int namemax) {
+    if (!dir || !name || namemax < 2) return 0;
+    memset(&filedlg, 0, sizeof(filedlg));
+    strncpy(filedlg.title, title ? title : (save ? "Save As" : "Open"), sizeof(filedlg.title));
+    filedlg.save = save;
+    filedlg.dir = *dir;
+    strncpy(filedlg.name, name, 27);
+    filedlg.namelen = (int)strlen(filedlg.name);
+    file_refresh();
+    filedlg.on = 1;
+    menu_on = 0;
+    sys_on = 0;
+    for (;;) {
+        filedlg.result = -1;
+        gui_invalidate();
+        while (filedlg.result < 0) gui_pump();
+        if (filedlg.result == 0) {
+            filedlg.on = 0;
+            gui_invalidate();
+            return 0;
+        }
+        if (!filedlg.name[0]) continue;
+        int existing = fs_lookup(filedlg.dir, filedlg.name);
+        if (!save) {
+            if (existing < 0 || fs_is_dir(existing)) {
+                gui_dialog("Open", "Choose a file in this folder.", "OK", 0, 0);
+                continue;
+            }
+        } else if (existing >= 0 && !fs_is_dir(existing)) {
+            int r = gui_dialog("Save As", "Replace the existing file?", "Yes", "No", 0);
+            if (r != 1) continue;
+        } else if (existing >= 0 && fs_is_dir(existing)) {
+            filedlg.dir = (uint16_t)existing;
+            filedlg.name[0] = 0;
+            filedlg.namelen = 0;
+            file_refresh();
+            continue;
+        }
+        break;
+    }
+    *dir = filedlg.dir;
+    strncpy(name, filedlg.name, (size_t)namemax);
+    name[namemax - 1] = 0;
+    filedlg.on = 0;
+    gui_invalidate();
+    return 1;
+}
 
 static void dialog_geom(int *x, int *y, int *w, int *h) {
     *w = 460;
@@ -598,6 +763,7 @@ static void compose(void) {
     if (dialog.on) paint_dialog();
     if (prompt.on) paint_prompt_box();
     if (pick.on) paint_pick();
+    if (filedlg.on) paint_filedlg();
     gfx_present();
     cursor_invalidate();
     cursor_draw(mouse_x, mouse_y);
@@ -656,7 +822,7 @@ static void client_event(Window *w, int type, int dbl) {
 static void on_left_down(void) {
     int dbl = 0;
     uint32_t t = timer_ticks();
-    if (t - click_tick < 45 && iabs(mouse_x - click_x) < 6 && iabs(mouse_y - click_y) < 6) dbl = 1;
+    if (t - click_tick < (uint32_t)settings_dbl_ticks() && iabs(mouse_x - click_x) < 6 && iabs(mouse_y - click_y) < 6) dbl = 1;
     click_tick = t;
     click_x = mouse_x;
     click_y = mouse_y;
@@ -679,6 +845,26 @@ static void on_left_down(void) {
         else if (b == 2) {
             if (row == pick.sel && dbl) pick.result = 1;
             else { pick.sel = row; gui_invalidate(); }
+        }
+        return;
+    }
+    if (filedlg.on) {
+        int row = -1;
+        int b = file_click(mouse_x, mouse_y, &row, dbl);
+        if (b == 0) filedlg.result = 0;
+        else if (b == 1) filedlg.result = 1;
+        else if (b == 2 && row >= 0) {
+            filedlg.sel = row;
+            if (!filedlg.isdir[row]) {
+                strncpy(filedlg.name, filedlg.labels[row], 28);
+                filedlg.namelen = (int)strlen(filedlg.name);
+            }
+            gui_invalidate();
+        } else if (b == 3 && row >= 0) {
+            if (filedlg.ids[row] < 0) filedlg.dir = fs_parent(filedlg.dir);
+            else filedlg.dir = (uint16_t)filedlg.ids[row];
+            file_refresh();
+            gui_invalidate();
         }
         return;
     }
@@ -834,6 +1020,36 @@ static void on_key(KeyEvent *k) {
         if (k->code == KEY_DOWN && pick.sel + 1 < pick.count) { pick.sel++; gui_invalidate(); }
         return;
     }
+    if (filedlg.on) {
+        if (k->code == 27) { filedlg.result = 0; return; }
+        if (k->code == 10 || k->code == 13) {
+            if (filedlg.sel >= 0 && filedlg.sel < filedlg.count && filedlg.isdir[filedlg.sel] && !filedlg.name[0]) {
+                if (filedlg.ids[filedlg.sel] < 0) filedlg.dir = fs_parent(filedlg.dir);
+                else filedlg.dir = (uint16_t)filedlg.ids[filedlg.sel];
+                file_refresh();
+                gui_invalidate();
+            } else filedlg.result = 1;
+            return;
+        }
+        if (k->code == KEY_UP && filedlg.sel > 0) { filedlg.sel--; gui_invalidate(); return; }
+        if (k->code == KEY_DOWN && filedlg.sel + 1 < filedlg.count) { filedlg.sel++; gui_invalidate(); return; }
+        if (k->code == 8) {
+            if (filedlg.namelen > 0) filedlg.name[--filedlg.namelen] = 0;
+            gui_invalidate();
+            return;
+        }
+        if (k->code >= 32 && k->code < 127 && filedlg.namelen < 27) {
+            char c = (char)k->code;
+            int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                     (c >= '0' && c <= '9') || c == ' ' || c == '.' || c == '_' || c == '-';
+            if (ok) {
+                filedlg.name[filedlg.namelen++] = c;
+                filedlg.name[filedlg.namelen] = 0;
+                gui_invalidate();
+            }
+        }
+        return;
+    }
     if (prompt.on) {
         if (k->code == 27) { prompt.result = 0; return; }
         if (k->code == 10 || k->code == 13) { prompt.result = 1; return; }
@@ -865,7 +1081,7 @@ static void on_key(KeyEvent *k) {
         return;
     }
     if (k->alt && k->code == 9) { cycle_focus(); return; }
-    if (k->code >= KEY_F2 && k->code <= KEY_F9 && launch_fn) {
+    if (k->code >= KEY_F2 && k->code <= KEY_F12 && launch_fn) {
         launch_fn(k->code - KEY_F2 + 2);
         return;
     }
@@ -913,6 +1129,7 @@ static void screensaver(void) {
 }
 
 void gui_pump(void) {
+    sound_tick();
     static int last_sec = -1;
     static int last_input = -1;
     int sec = rtc_seconds_of_day();
@@ -935,7 +1152,7 @@ void gui_pump(void) {
     if (!modal_active()) {
         int idle = sec - last_input;
         if (idle < 0) idle += 86400;
-        if (idle >= 45) {
+        if (settings_saver_on() && idle >= settings_saver_seconds()) {
             screensaver();
             last_input = rtc_seconds_of_day();
         }

@@ -3,6 +3,8 @@
 
 void wall_load(void);
 void wall_draw(void);
+void wall_set(int id);
+int wall_get(void);
 void app_wall_open(void);
 
 #endif

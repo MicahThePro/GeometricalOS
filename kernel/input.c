@@ -1,6 +1,9 @@
 #include "input.h"
 #include "gfx.h"
 #include "io.h"
+#include "vmm.h"
+#include "serial.h"
+#include "settings.h"
 
 int mouse_x, mouse_y, mouse_buttons;
 
@@ -53,7 +56,7 @@ static void pit_init(void) {
 
 uint32_t timer_ticks(void) { return ticks; }
 
-static void timer_poll(void) {
+void input_timer(void) {
     if (!pit_on) return;
     uint16_t now = pit_read();
     if (now > pit_last) ticks++;
@@ -121,33 +124,81 @@ static void kbd_feed(uint8_t sc) {
 static uint8_t pkt[3];
 static int pkt_i;
 static int prev_btn;
+static uint32_t pkt_tick;
 
 static int scale_delta(int d) {
+    int speed = settings_mouse_speed();
+    if (speed < 1) speed = 1;
+    d = d * speed / 2;
     int a = d < 0 ? -d : d;
-    if (a > 10) d += d / 2;
+    if (a > 8) d += d / 2;
     return d;
 }
 
-static void mouse_feed(uint8_t b) {
-    if (pkt_i == 0 && !(b & 0x08)) return;
-    if (pkt_i == 0 && (b & 0xC0)) return;
-    pkt[pkt_i++] = b;
-    if (pkt_i < 3) return;
-    pkt_i = 0;
-    int dx = (int)pkt[1] - ((pkt[0] & 0x10) ? 256 : 0);
-    int dy = (int)pkt[2] - ((pkt[0] & 0x20) ? 256 : 0);
-    mouse_x += scale_delta(dx);
-    mouse_y -= scale_delta(dy);
+static void mouse_clamp(void) {
+    int w = gfx_width();
+    int h = gfx_height();
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
     if (mouse_x < 0) mouse_x = 0;
     if (mouse_y < 0) mouse_y = 0;
-    if (mouse_x >= gfx_width()) mouse_x = gfx_width() - 1;
-    if (mouse_y >= gfx_height()) mouse_y = gfx_height() - 1;
+    if (mouse_x >= w) mouse_x = w - 1;
+    if (mouse_y >= h) mouse_y = h - 1;
+}
+
+/* Byte 0 of a PS/2 packet always has bit 3 set, and bits 6 and 7 clear
+ * unless that axis overflowed. A movement byte can look similar, so a
+ * header is only trusted at the start of a packet or after a gap.
+ */
+static int mouse_header(uint8_t b) {
+    if ((b & 0x08) == 0) return 0;
+    if (b & 0xC0) return 0;
+    return 1;
+}
+
+static void mouse_apply(void) {
+    /* Sign bits in byte 0 must agree with the high bit of each delta.
+     * A mismatch means the three bytes are not one packet.
+     */
+    if (((pkt[0] >> 4) & 1) != (pkt[1] >> 7)) return;
+    if (((pkt[0] >> 5) & 1) != (pkt[2] >> 7)) return;
+    int dx = (int)(int8_t)pkt[1];
+    int dy = (int)(int8_t)pkt[2];
+    if (dx > 40) dx = 40;
+    if (dx < -40) dx = -40;
+    if (dy > 40) dy = 40;
+    if (dy < -40) dy = -40;
+    if (!vmm_mouse_absolute()) {
+        mouse_x += scale_delta(dx);
+        mouse_y -= scale_delta(dy);
+        mouse_clamp();
+    }
     int btn = pkt[0] & 0x07;
+    if (settings_swap_buttons()) btn = (btn & ~3) | ((btn & 1) << 1) | ((btn & 2) >> 1);
     int changed = btn ^ prev_btn;
     prev_btn = btn;
     mouse_buttons = btn;
     if (changed & 1) mouse_push((btn & 1) ? MOUSE_LDOWN : MOUSE_LUP);
     if (changed & 2) mouse_push((btn & 2) ? MOUSE_RDOWN : MOUSE_RUP);
+}
+
+static void mouse_feed(uint8_t b) {
+    if (pkt_i && timer_ticks() - pkt_tick > 4) pkt_i = 0;
+    if (pkt_i != 0 && mouse_header(b) && timer_ticks() - pkt_tick > 1) {
+        pkt_i = 0;
+    }
+    if (pkt_i == 0) {
+        if (!mouse_header(b)) return;
+        pkt[0] = b;
+        pkt_i = 1;
+        pkt_tick = timer_ticks();
+        return;
+    }
+    pkt[pkt_i++] = b;
+    pkt_tick = timer_ticks();
+    if (pkt_i < 3) return;
+    pkt_i = 0;
+    mouse_apply();
 }
 
 static int ps2_wait_write(void) {
@@ -184,7 +235,16 @@ static void mouse_ack(void) {
     }
 }
 
+static void irq_mask_polling(void) {
+    /* The kernel polls the controller. Mask the keyboard and mouse IRQs
+     * so a leftover BIOS handler cannot consume a byte between our reads.
+     */
+    outb(0x21, (uint8_t)(inb(0x21) | 0x02));
+    outb(0xA1, (uint8_t)(inb(0xA1) | 0x10));
+}
+
 static void mouse_init(void) {
+    irq_mask_polling();
     while (inb(0x64) & 1) inb(0x60);
     ps2_cmd(0xA8);
     ps2_cmd(0x20);
@@ -203,6 +263,8 @@ static void mouse_init(void) {
     mouse_y = gfx_height() / 2;
     prev_btn = 0;
     pkt_i = 0;
+    pkt_tick = 0;
+    if (!vmm_mouse_init()) serial_write("MOUSE: ps/2\n");
 }
 
 void input_init(void) {
@@ -212,13 +274,21 @@ void input_init(void) {
 
 void input_poll(void) {
     for (int n = 0; n < 32; n++) {
+        uint32_t flags;
+        __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
         uint8_t st = inb(0x64);
-        if (!(st & 1)) break;
+        if (!(st & 1)) {
+            if (flags & 0x200) __asm__ volatile ("sti");
+            break;
+        }
         uint8_t d = inb(0x60);
+        if (flags & 0x200) __asm__ volatile ("sti");
         if (st & 0x20) mouse_feed(d);
         else kbd_feed(d);
     }
-    timer_poll();
+    if (vmm_mouse_poll(&mouse_x, &mouse_y, gfx_width(), gfx_height()))
+        mouse_clamp();
+    input_timer();
 }
 
 int input_key(KeyEvent *ev) {

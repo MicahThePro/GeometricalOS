@@ -12,7 +12,8 @@ enum {
     ICON_PAINT,
     ICON_MINE,
     ICON_TERM,
-    ICON_SOL
+    ICON_SOL,
+    ICON_WEB
 };
 
 enum {
@@ -58,6 +59,8 @@ struct Window {
     MenuCol menus[MENU_MAX];
     int menu_count;
     void (*event)(Window *w, Event *e);
+    /* Return 0 to keep the window open (for example after Cancel). */
+    int (*ask_close)(Window *w);
     Window **owner;
     int icon;
     void *user;
@@ -78,6 +81,8 @@ void window_add_item(Window *w, int menu, const char *label, int id);
 int gui_dialog(const char *title, const char *msg, const char *b1, const char *b2, const char *b3);
 int gui_prompt(const char *title, const char *label, char *buf, int buflen);
 int gui_pick(const char *title, char names[][28], int count);
+/* save=1 is Save As, save=0 is Open. dir and name are updated on OK. */
+int gui_file(const char *title, int save, uint16_t *dir, char *name, int namemax);
 void gui_set_launcher(void (*fn)(int fkey));
 
 void icons_draw(int id, int x, int y);

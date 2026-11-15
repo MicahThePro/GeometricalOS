@@ -6,10 +6,14 @@ void app_notepad_load(int inode);
 void app_calc_open(void);
 void app_clock_open(void);
 void app_paint_open(void);
+void app_paint_load(int inode);
 void app_mines_open(void);
 void app_files_open(void);
 void app_term_open(void);
 void app_sol_open(void);
+void app_browser_open(void);
+void app_control_open(void);
+void app_player_open(void);
 int login_screen(void);
 
 void desktop_init(void);
