@@ -7,6 +7,7 @@
 #include "sound.h"
 #include "wallpaper.h"
 #include "serial.h"
+#include <stdint.h>
 
 static Window *pm;
 static Window *groups[3];
@@ -28,6 +29,9 @@ static const Prog acc_items[] = {
     {"Clock", ICON_CLOCK, app_clock_open},
     {"Paint", ICON_PAINT, app_paint_open},
     {"Terminal", ICON_TERM, app_term_open},
+    {"Web Browser", ICON_WEB, app_browser_open},
+    {"Control Panel", ICON_GROUP, app_control_open},
+    {"Media Player", ICON_NOTE, app_player_open},
 };
 static const Prog game_items[] = {
     {"Minesweeper", ICON_MINE, app_mines_open},
@@ -36,7 +40,7 @@ static const Prog game_items[] = {
 
 static const Prog *group_items(int g, int *n) {
     if (g == 0) { *n = 1; return main_items; }
-    if (g == 1) { *n = 5; return acc_items; }
+    if (g == 1) { *n = 8; return acc_items; }
     *n = 2;
     return game_items;
 }
@@ -50,6 +54,9 @@ static void launch_key(int key) {
     else if (key == 7) app_mines_open();
     else if (key == 8) app_term_open();
     else if (key == 9) app_sol_open();
+    else if (key == 10) app_browser_open();
+    else if (key == 11) app_control_open();
+    else if (key == 12) app_player_open();
 }
 
 static void ask_exit(void) {

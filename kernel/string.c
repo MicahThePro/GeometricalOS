@@ -58,6 +58,12 @@ int strcasecmp(const char *a, const char *b) {
     return (int)(unsigned char)lower(*a) - (int)(unsigned char)lower(*b);
 }
 
+int strncasecmp(const char *a, const char *b, size_t n) {
+    while (n && *a && lower(*a) == lower(*b)) { a++; b++; n--; }
+    if (n == 0) return 0;
+    return (int)(unsigned char)lower(*a) - (int)(unsigned char)lower(*b);
+}
+
 void strcpy(char *dst, const char *src) {
     while ((*dst++ = *src++)) {}
 }

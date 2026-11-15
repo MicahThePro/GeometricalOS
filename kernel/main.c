@@ -7,6 +7,7 @@
 #include "serial.h"
 #include "io.h"
 #include "sound.h"
+#include "settings.h"
 
 static void halt_screen(const char *title, const char *a, const char *b) {
     gfx_reset_clip();
@@ -58,6 +59,7 @@ void kmain(void) {
         serial_write("FS: mount failed\n");
         halt_screen("GeometricalOS", "This hard disk is not installed.", "Boot the GeometricalOS CD and run Setup.");
     }
+    settings_load();
     splash_screen();
     login_screen();
     desktop_init();

@@ -11,7 +11,7 @@
 #define DATA_LBA         (FS_LBA + DATA_OFF)
 #define BITMAP_LBA       (FS_LBA + 1u)
 #define INODE_LBA        (FS_LBA + 1u + BITMAP_SECTORS)
-#define MAX_FILE_BYTES   (128u * 512u)
+#define MAX_FILE_BYTES   (280u * 512u)
 
 typedef struct __attribute__((packed)) {
     char magic[8];

@@ -26,6 +26,7 @@ It is not Linux. It is a 32-bit freestanding kernel with its own bootloader, a s
 | ![Clock](screenshots/07-clock.png) | ![Paint](screenshots/08-paint.png) |
 | ![Minesweeper](screenshots/09-minesweeper.png) | ![File Manager](screenshots/10-file-manager.png) |
 | ![Terminal](screenshots/11-terminal.png) | ![Solitaire](screenshots/12-solitaire.png) |
+| ![Browser](screenshots/13-browser.png) | ![ipconfig](screenshots/14-ipconfig.png) |
 
 The boot splash is a static geometric logo (a square, a circle, and a triangle) with the name GeometricalOS. It stays up for a couple of seconds, then the logon screen appears.
 
@@ -115,16 +116,22 @@ If the VM boots the CD again, the ISO is still attached or Optical is still firs
 | F7 | Minesweeper |
 | F8 | Terminal |
 | F9 | Solitaire |
+| F10 | Web Browser |
+| F11 | Control Panel |
+| F12 | Media Player |
 
 ### The programs
 
-- **Notepad** — type, move the cursor, and use File → New, Open, Save, and Save As. Files are saved on the GeometricalOS disk. Open `README.TXT` from File Manager by double-clicking it.
+- **Notepad** — File → New, Open, Save, and Save As. The dialog lists folders and files, has a file-name box, and OK / Cancel. Closing a changed document asks whether to save. Files stay on the GeoFS disk across reboots. Open `.TXT` from File Manager.
 - **Calculator** — mouse or keyboard. `+ - * /`, decimal point, backspace, and C.
 - **Clock** — analog and digital time from the virtual machine’s clock.
-- **Paint** — Pen, Line, Box, Fill, Clear, and 16 colors. Keys: P, L, B, F, C.
+- **Paint** — Pen, Line, Box, Fill, Clear, and 16 colors. Keys: P, L, B, F, C. File → Save writes a `.GIM` picture. File Manager opens those in Paint. Unsaved changes are asked about on close.
 - **Minesweeper** — beginner 9×9 grid, 10 mines. Left click opens, right click flags. The first click is never a mine. Click the face to start over.
-- **File Manager** — folders and files. Enter a folder, go up, delete, and open `.TXT` files in Notepad.
-- **Terminal** — type `help`. Commands: `dir` or `ls`, `cd`, `type` or `cat`, `echo`, `cls`, `mkdir`, `del`, `ver`, `date`, `time`, `shutdown`, `restart`.
+- **File Manager** — folders and files. Enter a folder, go up, delete, and open `.TXT` files in Notepad or `.GIM` pictures in Paint.
+- **Terminal** — type `help`. Commands: `dir` or `ls`, `cd`, `type` or `cat`, `echo`, `cls`, `mkdir`, `del`, `ver`, `date`, `time`, `ipconfig`, `ping`, `shutdown`, `restart`.
+- **Web Browser** — HTTP only. Address bar, Back, Forward, Reload, and Go. It shows headings, paragraphs, lists, bold, italic, preformatted text, and clickable `http://` links. `https://` is refused.
+- **Control Panel** — color scheme, desktop pattern, screensaver, mouse speed and buttons, date and time, sound, and the DHCP address. Choices are stored in `SETTINGS.CFG`.
+- **Media Player** — Play, Pause, and Stop for five short built-in tunes, with a position bar. Sound Blaster 16 plays them when that card is selected; otherwise the PC speaker does.
 - **Solitaire** — Klondike, one card at a time. Click the deck to draw. Click a card, then a pile, to move it. Double-click a card to file it on a foundation when the rules allow. Press N for a new game.
 
 ## Build it yourself (Linux or WSL)
@@ -156,7 +163,7 @@ The kernel is freestanding C and NASM. It enters 32-bit protected mode, sets a V
 | Setup says the primary master is the CD | Put the ISO on the **Secondary Master**, not the primary master. |
 | The screen stays on a line that starts with `GeometricalOS:` | That line is the last step that finished. `loading from CD` means the disc read failed (check that the ISO is the IDE Secondary Master). `setting VESA mode` with a black screen after it means the graphics card has no linear framebuffer; use VBoxVGA or VBoxSVGA with 3D acceleration off. |
 | Black screen and no text at all | Use the ISO from this fix. Older builds asked VirtualBox to load the CD at a segment it does not support, so Setup never started. |
-| Mouse does not move | Pointing device must be **PS/2 Mouse**, not a USB tablet. |
+| Mouse does not move | Pointing device must be **PS/2 Mouse**. GeometricalOS also asks VirtualBox for an absolute pointer, so the cursor can follow the host without capture when that device answers. |
 | No startup chime | Set the audio controller to **Sound Blaster 16**. |
 | It boots the installer again | Remove the ISO, then reboot. |
 | “This hard disk is not installed” | Boot the ISO and run Setup on that disk. |
@@ -166,21 +173,18 @@ The kernel is freestanding C and NASM. It enters 32-bit protected mode, sets a V
 
 The same IDE layout VirtualBox uses was tested with QEMU: hard disk on the primary master, CD on the secondary master, PS/2 mouse, 64 MB RAM, and the standard VGA card. Setup installed onto a blank 32 MB disk, and the next boot came from that disk through logon, Program Manager, and every built-in program.
 
-## Not in this version
+## Network
 
-There is **no network stack and no web browser**, so there is no HTTP and no HTTPS yet. Nothing in the tree speaks to a network card.
+In VirtualBox, open the VM settings, **Network**, Adapter 1:
 
-To add the browser the project is aiming for, this still has to be written:
+- Enable the adapter
+- Attached to: **NAT**
+- Adapter type: **PCnet-FAST III (Am79C973)**
 
-1. PCI scan, then a driver for **PCnet-FAST III (Am79C973)** or **Intel PRO/1000 MT Desktop (82540EM)**.
-2. ARP, IPv4, ICMP ping, UDP, a DHCP client, and DNS.
-3. A single-connection TCP client.
-4. An HTTP client and a simple page view (text, headings, links, line breaks).
-5. A freestanding TLS 1.2 client (BearSSL is the intended library; TLS 1.3 only if that port stays small).
-6. A bundle of common root CA certificates.
-7. Entropy from RDRAND when the CPU has it, otherwise PIT/RTC jitter, which is weak and would be labeled as such.
-8. A lock icon or an `https` mark in the address bar. If certificate checks are not finished, the browser would still connect and say that validation is off.
+That is the card GeometricalOS drives. Intel PRO/1000 is not driven. Do not use a virtio NIC. NAT gives DHCP, a gateway, and DNS. The browser speaks **HTTP only**. An `https://` address is turned down in the window; there is no TLS.
 
-VirtualBox settings for that future work: network attached to **NAT**, adapter type **PCnet-FAST III** or **Intel PRO/1000 MT Desktop**. Do not use a virtio NIC.
+QEMU’s matching setup is `-device pcnet,netdev=n0 -netdev user,id=n0`.
 
-Other limits: one IDE disk, no USB, no sound card besides Sound Blaster 16 and the PC speaker, and deleted files do not always reuse their disk space until you install again.
+## Limits
+
+One IDE disk, no USB, no sound card besides Sound Blaster 16 and the PC speaker, and deleted files do not always reuse their disk space until you install again.

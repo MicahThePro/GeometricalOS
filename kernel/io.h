@@ -23,6 +23,11 @@ static inline uint16_t inw(uint16_t port) {
     __asm__ volatile ("inw %1, %0" : "=a"(v) : "Nd"(port));
     return v;
 }
+static inline uint32_t inl(uint16_t port) {
+    uint32_t v;
+    __asm__ volatile ("inl %1, %0" : "=a"(v) : "Nd"(port));
+    return v;
+}
 static inline void io_wait(void) {
     outb(0x80, 0);
 }
@@ -40,6 +45,7 @@ int memcmp(const void *a, const void *b, size_t n);
 size_t strlen(const char *s);
 int strcmp(const char *a, const char *b);
 int strcasecmp(const char *a, const char *b);
+int strncasecmp(const char *a, const char *b, size_t n);
 void strcpy(char *dst, const char *src);
 void strncpy(char *dst, const char *src, size_t n);
 int strncmp(const char *a, const char *b, size_t n);

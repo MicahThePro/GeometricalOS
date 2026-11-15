@@ -20,7 +20,8 @@ C_SRCS := \
 	kernel/app_notepad.c kernel/app_calc.c kernel/app_clock.c kernel/app_paint.c \
 	kernel/app_mines.c kernel/app_files.c kernel/app_term.c kernel/app_sol.c \
 	kernel/sound.c kernel/wallpaper.c kernel/login.c kernel/font8x16_fallback.c \
-	kernel/desktop.c kernel/setup.c \
+	kernel/desktop.c kernel/setup.c kernel/pci.c kernel/vmm.c kernel/net.c \
+	kernel/settings.c kernel/app_browser.c kernel/app_control.c kernel/app_player.c \
 	kernel/main.c
 
 ASM_OBJS := $(BUILD)/entry.o

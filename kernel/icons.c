@@ -65,6 +65,13 @@ void icons_draw(int id, int x, int y) {
         gfx_fill_triangle(x + 12, y + 18, x + 16, y + 26, x + 20, y + 18, COL_RED);
         return;
     }
+    if (id == ICON_WEB) {
+        gfx_fill_circle(x + 16, y + 16, 12, COL_LTBLUE);
+        gfx_circle(x + 16, y + 16, 12, COL_WHITE);
+        gfx_hline(x + 4, y + 16, 24, COL_WHITE);
+        gfx_vline(x + 16, y + 4, 24, COL_WHITE);
+        return;
+    }
     if (id == ICON_MINE) {
         gfx_fill_circle(x + 16, y + 16, 7, COL_BLACK);
         gfx_line(x + 16, y + 3, x + 16, y + 29, COL_BLACK);

@@ -3,6 +3,7 @@
 #include "gfx.h"
 #include "fs.h"
 #include "io.h"
+#include "settings.h"
 
 static int wall_id;
 
@@ -21,9 +22,18 @@ void wall_load(void) {
         wall_id = b[0] - '0';
 }
 
+void wall_set(int id) {
+    if (id < 0) id = 0;
+    if (id > 3) id = 3;
+    wall_id = id;
+    wall_store();
+}
+
+int wall_get(void) { return wall_id; }
+
 void wall_draw(void) {
     int w = gfx_width(), h = gfx_height();
-    gfx_clear(COL_TEAL);
+    gfx_clear(settings_desktop_color());
     if (wall_id == 1) {
         for (int y = 0; y < h; y += 48)
             for (int x = 0; x < w; x += 48) {

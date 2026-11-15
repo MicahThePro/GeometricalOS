@@ -13,6 +13,7 @@ static int text_len, cursor, scroll;
 static char filename[28];
 static uint16_t parent;
 static Window *win;
+static int dirty;
 static int line_at[1024];
 static int nlines;
 
@@ -104,37 +105,47 @@ static int do_save(void) {
     ensure_buf();
     if (!filename[0]) {
         char name[28] = "NOTES.TXT";
-        if (!gui_prompt("Save As", "File name:", name, 28)) return 0;
-        if (!name[0]) return 0;
+        uint16_t dir = parent;
+        if (!gui_file("Save As", 1, &dir, name, 28)) return 0;
         strncpy(filename, name, 28);
-        parent = FS_ROOT;
+        parent = dir;
     }
     if (fs_write(parent, filename, textb, (uint32_t)text_len) < 0) {
         gui_dialog("Notepad", "Could not save the file.", "OK", 0, 0);
         return 0;
     }
+    dirty = 0;
     set_title();
+    serial_write("NOTE: saved ");
+    serial_write(filename);
+    serial_write("\n");
     return 1;
 }
 
+static int confirm_close(void) {
+    if (!dirty) return 1;
+    int r = gui_dialog("Notepad", "Save changes to this document?", "Yes", "No", "Cancel");
+    if (r == 1) return do_save();
+    if (r == 2) return 1;
+    return 0;
+}
+
+static int notepad_ask(Window *w) {
+    (void)w;
+    return confirm_close();
+}
+
 static void do_open(void) {
-    int ids[64];
-    int n = fs_list(FS_ROOT, ids, 64);
-    char names[48][28];
-    int map[48];
-    int c = 0;
-    for (int i = 0; i < n && c < 48; i++) {
-        if (fs_is_dir(ids[i])) continue;
-        strncpy(names[c], fs_name(ids[i]), 28);
-        map[c] = ids[i];
-        c++;
-    }
-    if (!c) {
-        gui_dialog("Open", "There are no files in the root folder yet.", "OK", 0, 0);
+    if (!confirm_close()) return;
+    uint16_t dir = parent;
+    char name[28] = "";
+    if (!gui_file("Open", 0, &dir, name, 28)) return;
+    int id = fs_lookup(dir, name);
+    if (id < 0) {
+        gui_dialog("Open", "That file is not in this folder.", "OK", 0, 0);
         return;
     }
-    int sel = gui_pick("Open", names, c);
-    if (sel >= 0) app_notepad_load(map[sel]);
+    app_notepad_load(id);
 }
 
 static void notepad_event(Window *w, Event *e) {
@@ -170,14 +181,23 @@ static void notepad_event(Window *w, Event *e) {
     }
     if (e->type == EVT_MENU) {
         if (e->menu_id == 1) {
+            if (!confirm_close()) return;
             text_len = 0; textb[0] = 0; cursor = 0; scroll = 0; filename[0] = 0; parent = FS_ROOT;
+            dirty = 0;
             set_title();
         } else if (e->menu_id == 2) do_open();
         else if (e->menu_id == 3) do_save();
         else if (e->menu_id == 4) {
-            filename[0] = 0;
+            char name[28];
+            strncpy(name, filename[0] ? filename : "NOTES.TXT", 28);
+            uint16_t dir = parent;
+            if (!gui_file("Save As", 1, &dir, name, 28)) return;
+            strncpy(filename, name, 28);
+            parent = dir;
             do_save();
-        } else if (e->menu_id == 5) gui_close(w);
+        } else if (e->menu_id == 5) {
+            if (confirm_close()) gui_close(w);
+        }
         return;
     }
     if (e->type == EVT_DOWN) {
@@ -199,9 +219,9 @@ static void notepad_event(Window *w, Event *e) {
     int line, col;
     cursor_line_col(cols, &line, &col);
     int code = e->code;
-    if (code == 8) backspace();
-    else if (code == KEY_DEL) delete_ch();
-    else if (code == 10 || code == 13) insert_ch('\n');
+    if (code == 8) { backspace(); dirty = 1; }
+    else if (code == KEY_DEL) { delete_ch(); dirty = 1; }
+    else if (code == 10 || code == 13) { insert_ch('\n'); dirty = 1; }
     else if (code == KEY_LEFT) { if (cursor > 0) cursor--; }
     else if (code == KEY_RIGHT) { if (cursor < text_len) cursor++; }
     else if (code == KEY_HOME) cursor = line_at[line];
@@ -214,7 +234,7 @@ static void notepad_event(Window *w, Event *e) {
         int maxc = line_end_col(line + 1);
         if (col > maxc) col = maxc;
         cursor = line_at[line + 1] + col;
-    } else if (code >= 32 && code < 127) insert_ch((char)code);
+    } else if (code >= 32 && code < 127) { insert_ch((char)code); dirty = 1; }
     if (cursor < 0) cursor = 0;
     if (cursor > text_len) cursor = text_len;
 }
@@ -227,6 +247,7 @@ static void open_window(void) {
     if (wh > gfx_height() - 20) wh = gfx_height() - 20;
     win = gui_create("Notepad", ww, wh, ICON_NOTE, notepad_event, &win);
     if (!win) return;
+    win->ask_close = notepad_ask;
     window_add_menu(win, "File");
     window_add_item(win, 0, "New", 1);
     window_add_item(win, 0, "Open...", 2);
@@ -256,6 +277,7 @@ void app_notepad_load(int inode) {
     scroll = 0;
     parent = fs_parent(inode);
     strncpy(filename, fs_name(inode), 28);
+    dirty = 0;
     set_title();
     gui_focus(win);
 }

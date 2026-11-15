@@ -1,7 +1,9 @@
 #include "apps.h"
 #include "gui.h"
 #include "gfx.h"
+#include "fs.h"
 #include "serial.h"
+#include "io.h"
 
 #define CW 480
 #define CH 280
@@ -11,6 +13,10 @@ static uint8_t *canvas;
 static int tool; /* 0 pencil 1 line 2 rect 3 fill */
 static int color = 0;
 static int dragging, x0, y0, x1, y1;
+static int dirty;
+static char filename[28];
+static uint16_t parent;
+static uint8_t *filebuf;
 
 static const uint32_t PAL[16] = {
     0x000000, 0x808080, 0x800000, 0xFF0000,
@@ -31,6 +37,7 @@ static int oy(void) { return 8; }
 static void cpixel(int x, int y, int col) {
     if (x < 0 || y < 0 || x >= CW || y >= CH) return;
     canvas[y * CW + x] = (uint8_t)col;
+    dirty = 1;
 }
 
 static void cline(int xa, int ya, int xb, int yb, int col) {
@@ -88,6 +95,61 @@ static void flood(int x, int y, int repl) {
     }
 }
 
+static void set_title(void) {
+    char t[48];
+    if (filename[0]) strcpy(t, filename);
+    else strcpy(t, "Untitled");
+    strncpy(t + strlen(t), " - Paint", 48 - strlen(t));
+    if (win) strncpy(win->title, t, sizeof(win->title));
+}
+
+static int save_image(void) {
+    ensure();
+    if (!filebuf) filebuf = (uint8_t *)0x700000;
+    if (!filename[0]) {
+        char name[28] = "PICTURE.GIM";
+        uint16_t dir = parent;
+        if (!gui_file("Save As", 1, &dir, name, 28)) return 0;
+        strncpy(filename, name, 28);
+        parent = dir;
+    }
+    memcpy(filebuf, "GIMG", 4);
+    filebuf[4] = (uint8_t)CW;
+    filebuf[5] = (uint8_t)(CW >> 8);
+    filebuf[6] = (uint8_t)CH;
+    filebuf[7] = (uint8_t)(CH >> 8);
+    memcpy(filebuf + 8, canvas, CW * CH);
+    if (fs_write(parent, filename, filebuf, 8u + CW * CH) < 0) {
+        gui_dialog("Paint", "Could not save the picture.", "OK", 0, 0);
+        return 0;
+    }
+    dirty = 0;
+    set_title();
+    serial_write("PAINT: saved ");
+    serial_write(filename);
+    serial_write("\n");
+    return 1;
+}
+
+static int confirm_close(void) {
+    if (!dirty) return 1;
+    int r = gui_dialog("Paint", "Save changes to this picture?", "Yes", "No", "Cancel");
+    if (r == 1) return save_image();
+    if (r == 2) return 1;
+    return 0;
+}
+
+static int paint_ask(Window *w) {
+    (void)w;
+    return confirm_close();
+}
+
+static void clear_canvas(void) {
+    ensure();
+    for (int i = 0; i < CW * CH; i++) canvas[i] = 15;
+    dirty = 1;
+}
+
 static int in_canvas(int x, int y) {
     return x >= ox() && y >= oy() && x < ox() + CW && y < oy() + CH;
 }
@@ -128,6 +190,34 @@ static void paint_event(Window *w, Event *e) {
         }
         return;
     }
+    if (e->type == EVT_MENU) {
+        if (e->menu_id == 1) {
+            if (!confirm_close()) return;
+            clear_canvas();
+            filename[0] = 0;
+            dirty = 0;
+            set_title();
+        } else if (e->menu_id == 2) {
+            if (!confirm_close()) return;
+            uint16_t dir = parent;
+            char name[28] = "";
+            if (!gui_file("Open", 0, &dir, name, 28)) return;
+            int id = fs_lookup(dir, name);
+            if (id >= 0) app_paint_load(id);
+        } else if (e->menu_id == 3) save_image();
+        else if (e->menu_id == 4) {
+            char name[28];
+            strncpy(name, filename[0] ? filename : "PICTURE.GIM", 28);
+            uint16_t dir = parent;
+            if (!gui_file("Save As", 1, &dir, name, 28)) return;
+            strncpy(filename, name, 28);
+            parent = dir;
+            save_image();
+        } else if (e->menu_id == 5) {
+            if (confirm_close()) gui_close(w);
+        }
+        return;
+    }
     if (e->type == EVT_KEY) {
         if (e->code == 'p' || e->code == 'P') tool = 0;
         else if (e->code == 'l' || e->code == 'L') tool = 1;
@@ -143,9 +233,7 @@ static void paint_event(Window *w, Event *e) {
         if (e->x >= 6 && e->x < 58) {
             int t = (e->y - 8) / 32;
             if (e->y >= 8 && t >= 0 && t < 4 && e->y < 8 + t * 32 + 26) tool = t;
-            if (e->y >= 8 + 4 * 32 + 8 && e->y < 8 + 4 * 32 + 34) {
-                for (int i = 0; i < CW * CH; i++) canvas[i] = 15;
-            }
+            if (e->y >= 8 + 4 * 32 + 8 && e->y < 8 + 4 * 32 + 34) clear_canvas();
         }
         if (e->y >= py && e->y < py + 18) {
             int idx = (e->x - 64) / 22;
@@ -179,5 +267,38 @@ void app_paint_open(void) {
     if (ww > gfx_width() - 10) ww = gfx_width() - 10;
     if (wh > gfx_height() - 10) wh = gfx_height() - 10;
     win = gui_create("Paint", ww, wh, ICON_PAINT, paint_event, &win);
+    if (!win) return;
+    win->ask_close = paint_ask;
+    window_add_menu(win, "File");
+    window_add_item(win, 0, "New", 1);
+    window_add_item(win, 0, "Open...", 2);
+    window_add_item(win, 0, "Save", 3);
+    window_add_item(win, 0, "Save As...", 4);
+    window_add_item(win, 0, "Exit", 5);
+    set_title();
     serial_write("APP: PAINT\n");
+}
+
+void app_paint_load(int inode) {
+    ensure();
+    app_paint_open();
+    if (!win || inode <= 0 || fs_is_dir(inode)) return;
+    if (!filebuf) filebuf = (uint8_t *)0x700000;
+    uint32_t sz = 0;
+    if (fs_read(inode, filebuf, 8u + CW * CH, &sz) || sz < 8 || memcmp(filebuf, "GIMG", 4) != 0) {
+        gui_dialog("Paint", "That file is not a GeometricalOS picture.", "OK", 0, 0);
+        return;
+    }
+    int w = filebuf[4] | (filebuf[5] << 8);
+    int h = filebuf[6] | (filebuf[7] << 8);
+    if (w != CW || h != CH || sz < 8u + CW * CH) {
+        gui_dialog("Paint", "This picture is the wrong size.", "OK", 0, 0);
+        return;
+    }
+    memcpy(canvas, filebuf + 8, CW * CH);
+    parent = fs_parent(inode);
+    strncpy(filename, fs_name(inode), 28);
+    dirty = 0;
+    set_title();
+    gui_focus(win);
 }
