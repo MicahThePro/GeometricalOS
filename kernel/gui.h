@@ -61,6 +61,7 @@ struct Window {
     void (*event)(Window *w, Event *e);
     /* Return 0 to keep the window open (for example after Cancel). */
     int (*ask_close)(Window *w);
+    int text_keys;
     Window **owner;
     int icon;
     void *user;

@@ -248,6 +248,7 @@ static void open_window(void) {
     win = gui_create("Notepad", ww, wh, ICON_NOTE, notepad_event, &win);
     if (!win) return;
     win->ask_close = notepad_ask;
+    win->text_keys = 1;
     window_add_menu(win, "File");
     window_add_item(win, 0, "New", 1);
     window_add_item(win, 0, "Open...", 2);

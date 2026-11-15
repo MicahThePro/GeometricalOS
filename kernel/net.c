@@ -227,7 +227,9 @@ static int ip_send(uint32_t dst, uint8_t proto, const void *payload, int len) {
     uint32_t next = dst;
     if (ip_mask && ((dst ^ ip_addr) & ip_mask)) next = ip_gw;
     if (!next) return -1;
-    if (arp_resolve(next, dmac)) return -1;
+    if (arp_resolve(next, dmac)) {
+        if (!ip_gw || next == ip_gw || arp_resolve(ip_gw, dmac)) return -1;
+    }
     ip_send_to(dmac, dst, proto, payload, len);
     return 0;
 }
@@ -243,16 +245,16 @@ static uint16_t transport_sum(uint32_t src, uint32_t dst, uint8_t proto, const v
     return checksum(payload, len, sum);
 }
 
-static void udp_send(uint32_t dst, uint16_t sport, uint16_t dport, const void *data, int len) {
+static int udp_send(uint32_t dst, uint16_t sport, uint16_t dport, const void *data, int len) {
     uint8_t buf[1472];
-    if (len < 0 || 8 + len > (int)sizeof(buf)) return;
+    if (len < 0 || 8 + len > (int)sizeof(buf)) return -1;
     put16(buf, sport);
     put16(buf + 2, dport);
     put16(buf + 4, (uint16_t)(8 + len));
     put16(buf + 6, 0);
     memcpy(buf + 8, data, (size_t)len);
     put16(buf + 6, transport_sum(ip_addr, dst, 17, buf, 8 + len));
-    ip_send(dst, 17, buf, 8 + len);
+    return ip_send(dst, 17, buf, 8 + len);
 }
 
 static void tcp_send_raw(uint8_t flags, const void *data, int len, int save) {
@@ -343,6 +345,7 @@ static void icmp_input(const uint8_t *p, int len, uint32_t src) {
     ip_send(src, 1, reply, len);
 }
 
+static int skip_dns_name(const uint8_t *data, int len, int i);
 static void udp_input(const uint8_t *p, int len, uint32_t src);
 static void dhcp_input(const uint8_t *p, int len, uint32_t src);
 
@@ -554,36 +557,30 @@ static void udp_input(const uint8_t *p, int len, uint32_t src) {
     if (dport == dns_wait_id && sport == 53 && dns_wait_id) {
         /* DNS id is in the payload, not the port. Handled below by port 53. */
     }
-    if (sport == 53 && dlen >= 12) {
+    if (sport == 53 && dlen >= 12 && (dport == 1053 || dport == (uint16_t)dns_wait_id)) {
         uint16_t id = get16(data);
-        if (id == (uint16_t)dns_wait_id && (data[3] & 0x0F) == 0) {
+        if (id == (uint16_t)dns_wait_id) {
             int qd = get16(data + 4);
             int an = get16(data + 6);
             int i = 12;
             while (qd-- > 0 && i < dlen) {
-                while (i < dlen && data[i]) {
-                    if ((data[i] & 0xC0) == 0xC0) { i += 2; break; }
-                    i += 1 + data[i];
-                }
-                if (i < dlen && data[i] == 0) i++;
+                i = skip_dns_name(data, dlen, i);
+                if (i < 0) return;
                 i += 4;
             }
-            while (an-- > 0 && i + 12 <= dlen) {
-                if ((data[i] & 0xC0) == 0xC0) i += 2;
-                else {
-                    while (i < dlen && data[i]) i += 1 + data[i];
-                    if (i < dlen) i++;
-                }
-                if (i + 10 > dlen) break;
+            while (an-- > 0 && i < dlen) {
+                i = skip_dns_name(data, dlen, i);
+                if (i < 0 || i + 10 > dlen) return;
                 uint16_t typ = get16(data + i);
                 uint16_t rdlen = get16(data + i + 8);
                 i += 10;
-                if (i + rdlen > dlen) break;
+                if (i + rdlen > dlen) return;
                 if (typ == 1 && rdlen == 4) {
                     dns_result = get32(data + i);
                     dns_got = 1;
                     return;
                 }
+                /* CNAME and other types: keep scanning for an A record. */
                 i += rdlen;
             }
         }
@@ -608,6 +605,11 @@ static int dhcp_run(void) {
     serial_write("NET: ip ");
     char b[20];
     net_format_ip(ip_addr, b, 20);
+    serial_write(b);
+    serial_write(" dns ");
+    if (!ip_dns) ip_dns = 0x0A000203u;
+    if (!ip_gw) ip_gw = 0x0A000202u;
+    net_format_ip(ip_dns, b, 20);
     serial_write(b);
     serial_write("\n");
     arp_store(ip_gw, 0);
@@ -678,44 +680,88 @@ static int parse_ip(const char *s, uint32_t *out) {
     return 0;
 }
 
-int net_resolve(const char *host, uint32_t *ip_out) {
-    if (!host || !ip_out) return -1;
-    if (!parse_ip(host, ip_out)) return 0;
-    if (!net_ready() || !ip_dns) return -1;
+static int skip_dns_name(const uint8_t *data, int len, int i) {
+    int guard = 0;
+    while (i < len && guard++ < 64) {
+        uint8_t n = data[i];
+        if (n == 0) return i + 1;
+        if ((n & 0xC0) == 0xC0) return (i + 2 <= len) ? i + 2 : -1;
+        if ((n & 0xC0) != 0) return -1;
+        if (i + 1 + n >= len) return -1;
+        i += 1 + n;
+    }
+    return -1;
+}
+
+static int dns_query_one(const char *host, uint32_t server, uint32_t *ip_out) {
     uint8_t q[256];
-    memset(q, 0, 12);
-    uint16_t id = (uint16_t)(timer_ticks() ^ 0x1357);
+    memset(q, 0, sizeof(q));
+    uint16_t id = (uint16_t)(0x4000u ^ (timer_ticks() & 0xFFFF) ^ (server & 0xFFFF));
+    if (id < 1024) id = (uint16_t)(id + 2000);
     put16(q, id);
-    q[2] = 0x01;
-    put16(q + 4, 1);
+    q[2] = 0x01; /* recursion desired */
+    put16(q + 4, 1); /* one question */
     int o = 12;
     const char *p = host;
-    while (*p && o < 240) {
+    while (*p && o < 220) {
         const char *dot = p;
         while (*dot && *dot != '.') dot++;
         int n = (int)(dot - p);
-        if (n <= 0 || n > 63 || o + n + 1 >= 250) return -1;
+        if (n <= 0 || n > 63) return -1;
         q[o++] = (uint8_t)n;
         memcpy(q + o, p, (size_t)n);
         o += n;
-        if (*dot == '.') p = dot + 1;
-        else p = dot;
+        p = *dot == '.' ? dot + 1 : dot;
     }
     q[o++] = 0;
-    put16(q + o, 1); o += 2;
-    put16(q + o, 1); o += 2;
+    put16(q + o, 1); o += 2; /* A */
+    put16(q + o, 1); o += 2; /* IN */
+    char sip[20];
+    net_format_ip(server, sip, 20);
+    serial_write("DNS: query ");
+    serial_write(host);
+    serial_write(" via ");
+    serial_write(sip);
+    serial_write("\n");
     dns_wait_id = id;
     dns_got = 0;
     dns_result = 0;
-    for (int a = 0; a < 3 && !dns_got; a++) {
-        udp_send(ip_dns, id, 53, q, o);
+    for (int a = 0; a < 4 && !dns_got; a++) {
+        if (udp_send(server, 1053, 53, q, o)) serial_write("DNS: send failed\n");
         uint32_t start = timer_ticks();
-        while (!dns_got && timer_ticks() - start < 80) net_service();
+        while (!dns_got && timer_ticks() - start < 120) net_service();
     }
     dns_wait_id = 0;
-    if (!dns_got) return -1;
+    if (!dns_got) {
+        serial_write("DNS: no answer\n");
+        return -1;
+    }
     *ip_out = dns_result;
+    serial_write("DNS: answer ");
+    net_format_ip(dns_result, sip, 20);
+    serial_write(sip);
+    serial_write("\n");
     return 0;
+}
+
+int net_resolve(const char *host, uint32_t *ip_out) {
+    if (!host || !ip_out) return -1;
+    if (!parse_ip(host, ip_out)) return 0;
+    if (!net_ready() && net_init()) return -1;
+    if (!net_ready()) return -1;
+    uint32_t servers[4];
+    int ns = 0;
+    if (ip_dns) servers[ns++] = ip_dns;
+    servers[ns++] = 0x0A000203u; /* 10.0.2.3, VirtualBox and QEMU NAT */
+    servers[ns++] = 0x08080808u;
+    servers[ns++] = 0x01010101u;
+    for (int i = 0; i < ns; i++) {
+        int dup = 0;
+        for (int j = 0; j < i; j++) if (servers[j] == servers[i]) dup = 1;
+        if (dup) continue;
+        if (!dns_query_one(host, servers[i], ip_out)) return 0;
+    }
+    return -1;
 }
 
 int net_ping(uint32_t dst, int *ticks_out) {
@@ -781,7 +827,7 @@ static int tcp_recv_until(uint8_t *buf, int max, int *out) {
     tcp.fin_seen = 0;
     uint32_t quiet = timer_ticks();
     int last = 0;
-    while (timer_ticks() - quiet < 80 && tcp.recv_len < max && tcp.state != TCP_CLOSED) {
+    while (timer_ticks() - quiet < 200 && tcp.recv_len < max && tcp.state != TCP_CLOSED) {
         net_service();
         if (tcp.recv_len != last) { last = tcp.recv_len; quiet = timer_ticks(); }
         if (tcp.fin_seen && tcp.recv_len == last) break;
@@ -791,6 +837,45 @@ static int tcp_recv_until(uint8_t *buf, int max, int *out) {
     tcp.snd_nxt += 1;
     tcp.state = TCP_CLOSED;
     return 0;
+}
+
+static void (*http_progress)(const char *);
+void http_set_progress(void (*fn)(const char *msg)) { http_progress = fn; }
+static void progress(const char *s) { if (http_progress) http_progress(s); }
+
+static int header_has(const uint8_t *hdr, int hdr_end, const char *key) {
+    int klen = (int)strlen(key);
+    for (int i = 0; i + klen + 1 < hdr_end; i++) {
+        if ((i == 0 || hdr[i - 1] == '\n') && strncasecmp((const char *)hdr + i, key, (size_t)klen) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int decode_chunked(uint8_t *src, int len, uint8_t *dst, int max) {
+    int i = 0, o = 0;
+    while (i < len && o < max) {
+        int size = 0, any = 0;
+        while (i < len && src[i] != '\n') {
+            char c = (char)src[i++];
+            if (c == '\r' || c == ';') continue;
+            any = 1;
+            if (c >= '0' && c <= '9') size = (size << 4) + (c - '0');
+            else if (c >= 'a' && c <= 'f') size = (size << 4) + (c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') size = (size << 4) + (c - 'A' + 10);
+        }
+        if (i < len && src[i] == '\n') i++;
+        if (!any) break;
+        if (size == 0) break;
+        if (i + size > len) size = len - i;
+        if (o + size > max) size = max - o;
+        memcpy(dst + o, src + i, (size_t)size);
+        o += size;
+        i += size;
+        if (i < len && src[i] == '\r') i++;
+        if (i < len && src[i] == '\n') i++;
+    }
+    return o;
 }
 
 static int url_split(const char *url, char *host, int hostmax, uint16_t *port, const char **path) {
@@ -834,20 +919,36 @@ int http_get(const char *url, char *body, int max, int *out_len, int *status,
         uint16_t port = 80;
         const char *path = "/";
         if (url_split(current, host, sizeof(host), &port, &path)) return -3;
+        progress("Resolving...");
         uint32_t dip = 0;
         if (net_resolve(host, &dip)) return -4;
+        progress("Connecting...");
         if (tcp_connect(dip, port)) return -5;
-        char req[300];
+        progress("Loading...");
+        char req[512];
         int n = 0;
-        const char *parts[] = { "GET ", path, " HTTP/1.0\r\nHost: ", host, "\r\nUser-Agent: GeometricalOS\r\nAccept: text/html\r\nConnection: close\r\n\r\n" };
-        for (int i = 0; i < 5; i++) {
-            for (const char *s = parts[i]; *s && n + 1 < (int)sizeof(req); s++) req[n++] = *s;
+        const char *p0 = "GET ";
+        const char *p1 = path;
+        const char *p2 = " HTTP/1.0\r\nHost: ";
+        const char *p3 = host;
+        for (const char *s = p0; *s && n + 1 < (int)sizeof(req); s++) req[n++] = *s;
+        for (const char *s = p1; *s && n + 1 < (int)sizeof(req); s++) req[n++] = *s;
+        for (const char *s = p2; *s && n + 1 < (int)sizeof(req); s++) req[n++] = *s;
+        for (const char *s = p3; *s && n + 1 < (int)sizeof(req); s++) req[n++] = *s;
+        if (port != 80 && n + 8 < (int)sizeof(req)) {
+            req[n++] = ':';
+            char rev[8]; int r = 0, v = port;
+            if (!v) rev[r++] = '0';
+            while (v && r < 8) { rev[r++] = (char)('0' + v % 10); v /= 10; }
+            while (r) req[n++] = rev[--r];
         }
+        const char *tail = "\r\nUser-Agent: GeometricalOS\r\nAccept: text/html,*/*\r\nConnection: close\r\n\r\n";
+        for (const char *s = tail; *s && n + 1 < (int)sizeof(req); s++) req[n++] = *s;
         if (tcp_send_data(req, n)) { tcp.state = TCP_CLOSED; return -6; }
         static uint8_t *raw;
-        if (!raw) raw = (uint8_t *)0x740000;
+        if (!raw) raw = (uint8_t *)0x780000;
         int got = 0;
-        tcp_recv_until(raw, 48 * 1024 - 1, &got);
+        tcp_recv_until(raw, 80 * 1024 - 1, &got);
         raw[got] = 0;
         int hdr = 0;
         for (int i = 0; i + 3 < got; i++) {
@@ -883,9 +984,17 @@ int http_get(const char *url, char *body, int max, int *out_len, int *status,
             }
         }
         int blen = got - hdr;
-        if (blen > max - 1) blen = max - 1;
         if (blen < 0) blen = 0;
-        memcpy(body, raw + hdr, (size_t)blen);
+        if (header_has(raw, hdr, "transfer-encoding: chunked")) {
+            static uint8_t *unchunk;
+            if (!unchunk) unchunk = (uint8_t *)0x7A0000;
+            blen = decode_chunked(raw + hdr, blen, unchunk, 64 * 1024);
+            if (blen > max - 1) blen = max - 1;
+            memcpy(body, unchunk, (size_t)blen);
+        } else {
+            if (blen > max - 1) blen = max - 1;
+            memcpy(body, raw + hdr, (size_t)blen);
+        }
         body[blen] = 0;
         if (out_len) *out_len = blen;
         if ((code == 301 || code == 302 || code == 303 || code == 307) && location[0]) {

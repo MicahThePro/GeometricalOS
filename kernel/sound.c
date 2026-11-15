@@ -28,26 +28,95 @@ static void pc_tone(int freq, int ticks) {
     outb(0x61, (uint8_t)(inb(0x61) & ~0x03));
 }
 
-static int sb_write(uint8_t v) {
-    for (int i = 0; i < 80000; i++) {
-        if (!(inb(0x22C) & 0x80)) {
-            outb(0x22C, v);
+static uint16_t sb_base;
+static int sb_ok;
+
+static void sb_udelay(void) {
+    for (int i = 0; i < 8000; i++) inb(0x80);
+}
+
+static int sb_write_b(uint16_t base, uint8_t v) {
+    for (int i = 0; i < 200000; i++) {
+        if (!(inb((uint16_t)(base + 0x0C)) & 0x80)) {
+            outb((uint16_t)(base + 0x0C), v);
             return 0;
         }
     }
     return -1;
 }
 
-static int sb16_present(void) {
-    outb(0x226, 1);
-    for (int i = 0; i < 1000; i++) inb(0x226);
-    outb(0x226, 0);
-    for (int i = 0; i < 80000; i++) {
-        if (inb(0x22E) & 0x80) {
-            if (inb(0x22A) == 0xAA) return 1;
+static int sb_write(uint8_t v) {
+    if (!sb_base) return -1;
+    return sb_write_b(sb_base, v);
+}
+
+static int sb_read_b(uint16_t base) {
+    for (int i = 0; i < 200000; i++) {
+        if (inb((uint16_t)(base + 0x0E)) & 0x80) return inb((uint16_t)(base + 0x0A));
+    }
+    return -1;
+}
+
+static void sb_mixer(uint8_t reg, uint8_t val) {
+    outb((uint16_t)(sb_base + 4), reg);
+    sb_udelay();
+    outb((uint16_t)(sb_base + 5), val);
+}
+
+static int sb_reset_base(uint16_t base) {
+    outb((uint16_t)(base + 6), 1);
+    sb_udelay();
+    sb_udelay();
+    outb((uint16_t)(base + 6), 0);
+    for (int i = 0; i < 400000; i++) {
+        if (inb((uint16_t)(base + 0x0E)) & 0x80) {
+            if (inb((uint16_t)(base + 0x0A)) == 0xAA) return 1;
         }
     }
     return 0;
+}
+
+static int sb16_present(void) {
+    static const uint16_t bases[] = {0x220, 0x240, 0x260, 0x280};
+    if (sb_ok) return 1;
+    for (int i = 0; i < 4; i++) {
+        if (!sb_reset_base(bases[i])) continue;
+        sb_base = bases[i];
+        sb_ok = 1;
+        sb_write_b(sb_base, 0xE1);
+        int maj = sb_read_b(sb_base);
+        int min = sb_read_b(sb_base);
+        int vol = settings_volume();
+        if (vol < 1) vol = 1;
+        if (vol > 15) vol = 15;
+        uint8_t nib = (uint8_t)((vol << 4) | vol);
+        sb_mixer(0x22, nib);
+        uint8_t voice = (uint8_t)(vol << 3);
+        sb_mixer(0x30, voice);
+        sb_mixer(0x31, voice);
+        sb_mixer(0x32, voice);
+        sb_mixer(0x33, voice);
+        sb_write(0xD1);
+        serial_write("SOUND: sb16 at ");
+        serial_hex32(sb_base);
+        serial_write(" dsp ");
+        serial_dec(maj < 0 ? 0 : (uint32_t)maj);
+        serial_write(".");
+        serial_dec(min < 0 ? 0 : (uint32_t)min);
+        serial_write("\n");
+        return 1;
+    }
+    serial_write("SOUND: no sb16\n");
+    return 0;
+}
+
+const char *sound_detect_text(void) {
+    sb16_present();
+    if (!sb_ok) return "No Sound Blaster found. Using the PC speaker.";
+    if (sb_base == 0x220) return "Sound Blaster 16 at 220h, IRQ 5, DMA 1.";
+    if (sb_base == 0x240) return "Sound Blaster 16 at 240h.";
+    if (sb_base == 0x260) return "Sound Blaster 16 at 260h.";
+    return "Sound Blaster 16 found.";
 }
 
 /* 8-bit single-cycle DMA on channel 1, the SB16 default. */
@@ -71,17 +140,30 @@ static void sb16_play(const uint8_t *src, uint32_t len) {
     sb_write(0xD1);
     {
         int vol = settings_volume();
-        if (vol < 0) vol = 0;
+        if (vol < 1) vol = 1;
         if (vol > 15) vol = 15;
         uint8_t v = (uint8_t)((vol << 4) | vol);
-        outb(0x224, 0x22);
-        outb(0x225, v);
+        sb_mixer(0x22, v);
+        uint8_t voice = (uint8_t)(vol << 3);
+        sb_mixer(0x30, voice);
+        sb_mixer(0x31, voice);
     }
+    /* DSP 4 output rate, then the classic time constant and 8-bit DMA. */
+    sb_write(0x41);
+    sb_write((uint8_t)(11025 >> 8));
+    sb_write((uint8_t)(11025 & 0xFF));
     sb_write(0x40);
-    sb_write(165); /* about 11025 Hz: 256 - 1000000/11025 */
+    sb_write(165);
     sb_write(0x14);
     sb_write((uint8_t)count);
     sb_write((uint8_t)(count >> 8));
+    for (int i = 0; i < 200000; i++) {
+        if (inb((uint16_t)(sb_base + 0x0E)) & 0x80) {
+            inb((uint16_t)(sb_base + 0x0A));
+            break;
+        }
+    }
+    inb((uint16_t)(sb_base + 0x0F));
 }
 
 static void fill_tone(uint8_t *dst, int samples, int period, int volume) {
@@ -241,4 +323,17 @@ int sound_play_pcm(const unsigned char *pcm, int samples, int rate) {
     }
     sb16_play(scaled, n);
     return 0;
+}
+
+void sound_test(void) {
+    serial_write(sb_ok ? "SOUND: test sb16\n" : "SOUND: test speaker\n");
+    if (!sb16_present()) {
+        pc_tone(880, 12);
+        pc_tone(660, 12);
+        return;
+    }
+    uint8_t wave[4000];
+    fill_tone(wave, 4000, 18, 40 + settings_volume());
+    sb16_play(wave, 4000);
+    delay_ticks(30);
 }

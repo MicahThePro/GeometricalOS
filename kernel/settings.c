@@ -1,6 +1,8 @@
 #include "settings.h"
 #include "fs.h"
 #include "io.h"
+#include "ata.h"
+#include "serial.h"
 
 static int scheme = 0;
 static int saver_on = 1;
@@ -49,6 +51,13 @@ void settings_load(void) {
     swap_buttons = field(buf, "mswap", swap_buttons) ? 1 : 0;
     sound_on = field(buf, "sound", sound_on) ? 1 : 0;
     volume = clamp(field(buf, "volume", volume), 0, 15);
+    serial_write("SET: scheme ");
+    serial_dec((uint32_t)scheme);
+    serial_write(" sound ");
+    serial_dec((uint32_t)sound_on);
+    serial_write(" vol ");
+    serial_dec((uint32_t)volume);
+    serial_write("\n");
 }
 
 void settings_save(void) {
@@ -68,7 +77,11 @@ void settings_save(void) {
         if (n < 150) buf[n++] = '\n';
     }
     buf[n] = 0;
-    fs_write(FS_ROOT, "SETTINGS.CFG", buf, (uint32_t)n);
+    if (fs_write(FS_ROOT, "SETTINGS.CFG", buf, (uint32_t)n) < 0)
+        serial_write("SET: write failed\n");
+    else
+        serial_write("SET: saved\n");
+    ata_flush();
 }
 
 int settings_scheme(void) { return scheme; }

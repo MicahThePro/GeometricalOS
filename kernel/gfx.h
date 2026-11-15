@@ -48,6 +48,16 @@ int gfx_text_width(const char *s);
 void gfx_raised(int x, int y, int w, int h, uint32_t face);
 void gfx_sunken(int x, int y, int w, int h, uint32_t face);
 void gfx_button(int x, int y, int w, int h, const char *label, int pressed);
+void gfx_buttons_begin(void);
+int gfx_button_hit(int x, int y, int *bx, int *by, int *bw, int *bh);
+void gfx_button_arm(int x, int y, int w, int h);
+void gfx_button_clear_arm(void);
+int gfx_button_armed(void);
+int gfx_button_arm_contains(int x, int y);
+void gfx_button_focus(int x, int y, int w, int h);
+int gfx_button_focus_rect(int *x, int *y, int *w, int *h);
+void gfx_slider(int x, int y, int w, int val, int lo, int hi, int focused);
+int gfx_slider_value(int x, int track_x, int track_w, int lo, int hi);
 
 void gfx_logo(int cx, int cy, int scale);
 void gfx_blit_indexed(int dx, int dy, const uint8_t *src, int bw, int bh,

@@ -13,5 +13,6 @@ typedef struct {
 int ata_probe(AtaDisk *disk);
 int ata_read(uint32_t lba, void *buf, uint32_t count);
 int ata_write(uint32_t lba, const void *buf, uint32_t count);
+int ata_flush(void);
 
 #endif
