@@ -42,9 +42,15 @@ static void open_sel(void) {
     int n = (int)strlen(name);
     int txt = n >= 4 && strcasecmp(name + n - 4, ".TXT") == 0;
     int gim = n >= 4 && strcasecmp(name + n - 4, ".GIM") == 0;
+    int wri = n >= 4 && strcasecmp(name + n - 4, ".WRI") == 0;
+    int crd = n >= 4 && strcasecmp(name + n - 4, ".CRD") == 0;
     if (txt) app_notepad_load(id);
     else if (gim) app_paint_load(id);
-    else gui_dialog("File Manager", "Open .TXT in Notepad or .GIM in Paint.", "OK", 0, 0);
+    else if (wri) app_write_load(id);
+    else if (crd) app_cardfile_load(id);
+    else gui_dialog("File Manager",
+                    "Open .TXT in Notepad, .WRI in Write,\n.CRD in Cardfile, or .GIM in Paint.",
+                    "OK", 0, 0);
 }
 
 static void files_event(Window *w, Event *e) {
@@ -112,9 +118,17 @@ static void files_event(Window *w, Event *e) {
             int total = count + extra;
             if (sel < 0 || sel >= total || (extra && sel == 0)) return;
             int id = ids[sel - extra];
-            if (gui_dialog("Delete", "Delete the selected item?", "Delete", "Cancel", 0) == 1) {
-                if (fs_delete(id))
-                    gui_dialog("File Manager", "Could not delete that item.\nFolders must be empty.", "OK", 0, 0);
+            int in_bin = cwd == fs_recycle_bin();
+            if (gui_dialog(in_bin ? "Delete permanently" : "Move to Recycle Bin",
+                           in_bin ? "Permanently delete the selected item?" :
+                                    "Move the selected item to the Recycle Bin?",
+                           in_bin ? "Delete" : "Move", "Cancel", 0) == 1) {
+                int result = in_bin ? fs_delete(id) : fs_recycle(id);
+                if (result)
+                    gui_dialog("File Manager",
+                               in_bin ? "Could not permanently delete that item.\nFolders must be empty." :
+                                        "Could not move that item to the Recycle Bin.",
+                               "OK", 0, 0);
                 reload();
             }
         } else if (e->menu_id == 4) gui_close(w);

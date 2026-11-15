@@ -14,6 +14,10 @@ int fs_create_dir(uint16_t parent, const char *name);
 int fs_write(uint16_t parent, const char *name, const void *data, uint32_t size);
 int fs_read(int inode, void *buf, uint32_t max, uint32_t *out_size);
 int fs_delete(int inode);
+int fs_recycle(int inode);
+int fs_restore(int inode);
+int fs_empty_recycle_bin(void);
+int fs_recycle_bin(void);
 int fs_list(uint16_t parent, int *out, int max);
 
 const char *fs_name(int inode);

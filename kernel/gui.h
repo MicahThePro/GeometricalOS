@@ -13,7 +13,12 @@ enum {
     ICON_MINE,
     ICON_TERM,
     ICON_SOL,
-    ICON_SNAKE
+    ICON_SNAKE,
+    ICON_WRITE,
+    ICON_CHARMAP,
+    ICON_CARDFILE,
+    ICON_RECYCLE,
+    ICON_SYSTEM
 };
 
 enum {
@@ -72,6 +77,7 @@ struct Window {
 
 void gui_run(void);
 void gui_invalidate(void);
+void gui_screen_resized(void);
 Window *gui_create(const char *title, int w, int h, int icon,
                    void (*event)(Window *, Event *), Window **owner);
 void gui_close(Window *w);
@@ -89,6 +95,9 @@ int gui_pick(const char *title, char names[][28], int count);
 /* save=1 is Save As, save=0 is Open. dir and name are updated on OK. */
 int gui_file(const char *title, int save, uint16_t *dir, char *name, int namemax);
 void gui_set_launcher(void (*fn)(int fkey));
+void gui_set_desktop_handler(void (*draw)(void), void (*event)(Event *));
+void gui_focus_desktop(void);
+int gui_desktop_focused(void);
 
 void icons_draw(int id, int x, int y);
 

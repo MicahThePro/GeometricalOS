@@ -149,8 +149,12 @@ static void button(int x, int y, int w, const char *label) {
     gfx_button(x, y, w, 26, label, 0);
 }
 
-static int click_in(int x, int y, int w, int h) {
-    return mouse_x >= x && mouse_y >= y && mouse_x < x + w && mouse_y < y + h;
+static void button_state(int x, int y, int w, const char *label, int pressed) {
+    gfx_button(x, y, w, 26, label, pressed);
+}
+
+static int point_in(int px, int py, int x, int y, int w, int h) {
+    return px >= x && py >= y && px < x + w && py < y + h;
 }
 
 /* Returns 1 for the primary button / Enter, 2 for secondary / Esc. */
@@ -179,6 +183,8 @@ static void draw_buttons(const char *primary, const char *secondary) {
 }
 
 static int poll_choice(const char *primary, const char *secondary) {
+    static int armed;
+    static int armed_choice;
     int bw = 120;
     int y = dy + dh - 42;
     int x2 = dx + dw - 18 - bw;
@@ -186,14 +192,37 @@ static int poll_choice(const char *primary, const char *secondary) {
     input_poll();
     MouseEvent m;
     while (input_mouse(&m)) {
-        if (m.type != MOUSE_LDOWN) continue;
-        if (click_in(x1, y, bw, 26)) return 1;
-        if (secondary && click_in(x2, y, bw, 26)) return 2;
+        if (m.type == MOUSE_LDOWN) {
+            if (point_in(m.x, m.y, x1, y, bw, 26)) armed_choice = 1;
+            else if (secondary && point_in(m.x, m.y, x2, y, bw, 26)) armed_choice = 2;
+            else continue;
+            armed = 1;
+            button_state(armed_choice == 1 ? x1 : x2, y, bw,
+                         armed_choice == 1 ? primary : secondary, 1);
+            present();
+        } else if (m.type == MOUSE_LUP && armed) {
+            int choice = armed_choice;
+            int inside = choice == 1 ? point_in(m.x, m.y, x1, y, bw, 26) :
+                         point_in(m.x, m.y, x2, y, bw, 26);
+            button_state(choice == 1 ? x1 : x2, y, bw,
+                         choice == 1 ? primary : secondary, 0);
+            present();
+            armed = 0;
+            if (inside) return choice;
+        }
     }
     KeyEvent k;
     while (input_key(&k)) {
-        if (k.code == 10 || k.code == 13) return 1;
-        if (k.code == 27) return 2;
+        if (k.code == 10 || k.code == 13 || k.code == 27) {
+            int choice = k.code == 27 && secondary ? 2 : 1;
+            button_state(choice == 1 ? x1 : x2, y, bw,
+                         choice == 1 ? primary : secondary, 1);
+            present();
+            button_state(choice == 1 ? x1 : x2, y, bw,
+                         choice == 1 ? primary : secondary, 0);
+            present();
+            return choice;
+        }
     }
     return 0;
 }
@@ -493,6 +522,7 @@ static void draw_fail(int code) {
 
 static int ask_line(const char *marker, const char *heading, const char *prompt, char *buf, int secret) {
     int len = (int)strlen(buf);
+    int button_armed = 0;
     serial_write(marker);
     for (;;) {
         frame("GeometricalOS Setup");
@@ -508,22 +538,38 @@ static int ask_line(const char *marker, const char *heading, const char *prompt,
         }
         gfx_text(dx + 102, dy + 114, shown, COL_BLACK, COL_WHITE);
         line(160, "ENTER accepts. ESC clears the field.", COL_BLACK);
-        draw_buttons("OK", 0);
+        int bw = 120;
+        int by = dy + dh - 42;
+        int bx = dx + dw - 18 - bw;
+        button_state(bx, by, bw, "OK", button_armed);
         present();
         input_poll();
         int go = 0;
         MouseEvent m;
         while (input_mouse(&m)) {
             if (m.type == MOUSE_LDOWN) {
-                int bw = 120;
-                int y = dy + dh - 42;
-                int x2 = dx + dw - 18 - bw;
-                if (click_in(x2, y, bw, 26)) go = 1;
+                if (point_in(m.x, m.y, bx, by, bw, 26)) {
+                    button_armed = 1;
+                    button_state(bx, by, bw, "OK", 1);
+                    present();
+                }
+            } else if (m.type == MOUSE_LUP && button_armed) {
+                int inside = point_in(m.x, m.y, bx, by, bw, 26);
+                button_armed = 0;
+                button_state(bx, by, bw, "OK", 0);
+                present();
+                if (inside) go = 1;
             }
         }
         KeyEvent k;
         while (input_key(&k)) {
-            if (k.code == 10 || k.code == 13) go = 1;
+            if (k.code == 10 || k.code == 13) {
+                button_state(bx, by, bw, "OK", 1);
+                present();
+                button_state(bx, by, bw, "OK", 0);
+                present();
+                go = 1;
+            }
             else if (k.code == 27) { len = 0; buf[0] = 0; }
             else if (k.code == 8 && len > 0) buf[--len] = 0;
             else if (!secret && k.code >= 32 && k.code < 127 && len < 20) {

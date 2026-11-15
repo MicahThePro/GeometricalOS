@@ -1,4 +1,5 @@
 #include "gui.h"
+#include "apps.h"
 #include "gfx.h"
 #include "input.h"
 #include "rtc.h"
@@ -33,6 +34,9 @@ static int sys_on;
 static Window *sys_win;
 
 static void (*launch_fn)(int fkey);
+static void (*desktop_draw_fn)(void);
+static void (*desktop_event_fn)(Event *);
+static int desktop_has_focus;
 
 static uint32_t click_tick;
 static int click_x, click_y;
@@ -42,10 +46,46 @@ enum { HIT_NONE, HIT_SYS, HIT_MIN, HIT_MAX, HIT_CLOSE, HIT_TITLE, HIT_MENU, HIT_
 static int iabs(int v) { return v < 0 ? -v : v; }
 
 void gui_set_launcher(void (*fn)(int fkey)) { launch_fn = fn; }
+void gui_set_desktop_handler(void (*draw)(void), void (*event)(Event *)) {
+    desktop_draw_fn = draw;
+    desktop_event_fn = event;
+}
+void gui_focus_desktop(void) {
+    focused = 0;
+    desktop_has_focus = 1;
+    menu_on = 0;
+    sys_on = 0;
+    gui_invalidate();
+}
+int gui_desktop_focused(void) { return desktop_has_focus; }
 
 void gui_invalidate(void) { dirty = 1; }
 
+void gui_screen_resized(void) {
+    int sw = gfx_width();
+    int sh = gfx_height();
+    for (int i = 0; i < MAXW; i++) {
+        Window *w = &wins[i];
+        if (!w->used) continue;
+        if (w->maximized) {
+            w->x = 0;
+            w->y = 0;
+            w->w = sw;
+            w->h = sh;
+            continue;
+        }
+        if (w->w > sw) w->w = sw;
+        if (w->h > sh) w->h = sh;
+        if (w->x + w->w > sw) w->x = sw - w->w;
+        if (w->y + w->h > sh) w->y = sh - w->h;
+        if (w->x < 0) w->x = 0;
+        if (w->y < 0) w->y = 0;
+    }
+    gui_invalidate();
+}
+
 static int modal_active(void);
+static Window *top_at(int x, int y);
 
 void window_client(Window *w, int *x, int *y, int *cw, int *ch) {
     *x = w->x + BORDER;
@@ -74,8 +114,10 @@ void window_add_item(Window *w, int menu, const char *label, int id) {
 
 void gui_focus(Window *w) {
     if (!w || !w->used) return;
+    if (focused != w) gfx_button_focus_clear();
     w->z = ++zseq;
     focused = w;
+    desktop_has_focus = 0;
     gui_invalidate();
 }
 
@@ -495,6 +537,7 @@ int gui_file(const char *title, int save, uint16_t *dir, char *name, int namemax
     filedlg.namelen = (int)strlen(filedlg.name);
     file_refresh();
     filedlg.on = 1;
+    gfx_button_focus_clear();
     menu_on = 0;
     sys_on = 0;
     for (;;) {
@@ -503,6 +546,7 @@ int gui_file(const char *title, int save, uint16_t *dir, char *name, int namemax
         while (filedlg.result < 0) gui_pump();
         if (filedlg.result == 0) {
             filedlg.on = 0;
+            gfx_button_focus_clear();
             gui_invalidate();
             return 0;
         }
@@ -529,6 +573,7 @@ int gui_file(const char *title, int save, uint16_t *dir, char *name, int namemax
     strncpy(name, filedlg.name, (size_t)namemax);
     name[namemax - 1] = 0;
     filedlg.on = 0;
+    gfx_button_focus_clear();
     gui_invalidate();
     return 1;
 }
@@ -557,7 +602,8 @@ static void button_row(int x, int y, int w, int n, const char labels[][16], int 
     for (int i = 0; i < n; i++) {
         bx[i] = sx + i * (bw0 + gap);
         gfx_button(bx[i], y, bw0, 24, labels[i], 0);
-        if (i == 0) gfx_button_focus(bx[i], y, bw0, 24);
+        if (i == 0 && !gfx_button_focus_rect(0, 0, 0, 0))
+            gfx_button_focus(bx[i], y, bw0, 24);
     }
     *bw = bw0;
 }
@@ -637,6 +683,7 @@ int gui_dialog(const char *title, const char *msg, const char *b1, const char *b
     if (b2) strncpy(dialog.btn[dialog.nbtn++], b2, 16);
     if (b3) strncpy(dialog.btn[dialog.nbtn++], b3, 16);
     if (!dialog.nbtn) strncpy(dialog.btn[dialog.nbtn++], "OK", 16);
+    gfx_button_focus_clear();
     dialog.on = 1;
     dialog.result = -1;
     menu_on = 0;
@@ -644,6 +691,7 @@ int gui_dialog(const char *title, const char *msg, const char *b1, const char *b
     gui_invalidate();
     while (dialog.result < 0) gui_pump();
     dialog.on = 0;
+    gfx_button_focus_clear();
     gui_invalidate();
     return dialog.result;
 }
@@ -660,12 +708,14 @@ int gui_prompt(const char *title, const char *label, char *buf, int buflen) {
     prompt.max = buflen - 1;
     if (prompt.max > 27) prompt.max = 27;
     prompt.on = 1;
+    gfx_button_focus_clear();
     prompt.result = -1;
     menu_on = 0;
     sys_on = 0;
     gui_invalidate();
     while (prompt.result < 0) gui_pump();
     prompt.on = 0;
+    gfx_button_focus_clear();
     gui_invalidate();
     return prompt.result;
 }
@@ -714,6 +764,7 @@ int gui_pick(const char *title, char names[][28], int count) {
     pick.count = count;
     for (int i = 0; i < count; i++) strncpy(pick.names[i], names[i], 28);
     pick.sel = 0;
+    gfx_button_focus_clear();
     pick.on = 1;
     pick.result = -1;
     menu_on = 0;
@@ -721,6 +772,7 @@ int gui_pick(const char *title, char names[][28], int count) {
     gui_invalidate();
     while (pick.result < 0) gui_pump();
     pick.on = 0;
+    gfx_button_focus_clear();
     gui_invalidate();
     return pick.result == 1 ? pick.sel : -1;
 }
@@ -751,6 +803,7 @@ static void compose(void) {
     gfx_buttons_begin();
     gfx_reset_clip();
     wall_draw();
+    if (desktop_draw_fn) desktop_draw_fn();
     paint_minimized();
     Window *order[MAXW];
     int n = 0;
@@ -814,6 +867,24 @@ static void update_menu_hover(void) {
     }
 }
 
+static void activate_menu_item(void) {
+    if (!menu_on || !menu_win || menu_i < 0 ||
+        menu_i >= menu_win->menu_count || menu_hover < 0 ||
+        menu_hover >= menu_win->menus[menu_i].count) return;
+    Event e;
+    memset(&e, 0, sizeof(e));
+    e.type = EVT_MENU;
+    e.menu_id = menu_win->menus[menu_i].ids[menu_hover];
+    Window *w = menu_win;
+    menu_on = 0;
+    send(w, &e);
+    gui_invalidate();
+}
+
+static int lower_char(int c) {
+    return c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c;
+}
+
 static void client_event(Window *w, int type, int dbl) {
     int cx, cy, cw, ch;
     window_client(w, &cx, &cy, &cw, &ch);
@@ -837,11 +908,14 @@ static void on_left_down(void) {
     click_x = mouse_x;
     click_y = mouse_y;
 
-    if (!delivering_click) {
+    if (!delivering_click && !modal_active()) {
         int bx, by, bw, bh;
         if (gfx_button_hit(mouse_x, mouse_y, &bx, &by, &bw, &bh)) {
+            Window *button_window = top_at(mouse_x, mouse_y);
+            if (button_window) gui_focus(button_window);
             gfx_button_arm(bx, by, bw, bh);
             gui_invalidate();
+            compose();
             return;
         }
     }
@@ -932,7 +1006,19 @@ static void on_left_down(void) {
 
     Window *w = top_at(mouse_x, mouse_y);
     if (!w) {
-        drag = 0;
+        desktop_has_focus = 1;
+        focused = 0;
+        drag = 3;
+        if (desktop_event_fn) {
+            Event e;
+            memset(&e, 0, sizeof(e));
+            e.type = EVT_DOWN;
+            e.x = mouse_x;
+            e.y = mouse_y;
+            e.dbl = dbl;
+            desktop_event_fn(&e);
+        }
+        gui_invalidate();
         return;
     }
     int which_menu = 0;
@@ -969,6 +1055,7 @@ static void on_left_down(void) {
     if (hit == HIT_CLIENT) {
         drag = 2;
         drag_win = w;
+        gfx_button_focus_clear();
         client_event(w, EVT_DOWN, dbl);
         return;
     }
@@ -979,6 +1066,8 @@ static void press_focused_button(void) {
     if (!gfx_button_focus_rect(&x, &y, &w, &h)) return;
     gfx_button_arm(x, y, w, h);
     compose();
+    gfx_button_clear_arm();
+    compose();
     delivering_click = 1;
     int ox = mouse_x, oy = mouse_y;
     mouse_x = x + w / 2;
@@ -987,7 +1076,6 @@ static void press_focused_button(void) {
     mouse_x = ox;
     mouse_y = oy;
     delivering_click = 0;
-    gfx_button_clear_arm();
     gui_invalidate();
 }
 
@@ -997,6 +1085,8 @@ static void on_left_up(void) {
         int x, y, w, h;
         gfx_button_focus_rect(&x, &y, &w, &h);
         gfx_button_clear_arm();
+        gui_invalidate();
+        compose();
         if (inside) {
             delivering_click = 1;
             int ox = mouse_x, oy = mouse_y;
@@ -1010,6 +1100,14 @@ static void on_left_up(void) {
         gui_invalidate();
     }
     if (drag == 2 && drag_win && drag_win->used) client_event(drag_win, EVT_UP, 0);
+    else if (drag == 3 && desktop_event_fn) {
+        Event e;
+        memset(&e, 0, sizeof(e));
+        e.type = EVT_UP;
+        e.x = mouse_x;
+        e.y = mouse_y;
+        desktop_event_fn(&e);
+    }
     drag = 0;
     drag_win = 0;
 }
@@ -1017,7 +1115,17 @@ static void on_left_up(void) {
 static void on_right_down(void) {
     if (modal_active() || menu_on || sys_on) return;
     Window *w = top_at(mouse_x, mouse_y);
-    if (!w) return;
+    if (!w) {
+        if (desktop_event_fn) {
+            Event e;
+            memset(&e, 0, sizeof(e));
+            e.type = EVT_RDOWN;
+            e.x = mouse_x;
+            e.y = mouse_y;
+            desktop_event_fn(&e);
+        }
+        return;
+    }
     int dummy = 0;
     if (hit_window(w, mouse_x, mouse_y, &dummy) == HIT_CLIENT) {
         gui_focus(w);
@@ -1039,6 +1147,13 @@ static void on_move(void) {
         gui_invalidate();
     } else if (drag == 2 && drag_win && drag_win->used && (mouse_buttons & 1)) {
         client_event(drag_win, EVT_MOVE, 0);
+    } else if (drag == 3 && desktop_event_fn && (mouse_buttons & 1)) {
+        Event e;
+        memset(&e, 0, sizeof(e));
+        e.type = EVT_MOVE;
+        e.x = mouse_x;
+        e.y = mouse_y;
+        desktop_event_fn(&e);
     }
 }
 
@@ -1061,22 +1176,74 @@ static void cycle_focus(void) {
     }
 }
 
+static int focused_button_in_window(Window *w) {
+    int bx, by, bw, bh;
+    if (!w || !gfx_button_focus_rect(&bx, &by, &bw, &bh)) return 0;
+    int x, y, cw, ch;
+    window_client(w, &x, &y, &cw, &ch);
+    int cx = bx + bw / 2, cy = by + bh / 2;
+    return cx >= x && cx < x + cw && cy >= y && cy < y + ch;
+}
+
 static void on_key(KeyEvent *k) {
     if (dialog.on) {
         if (k->code == 27) dialog.result = 0;
+        else if (k->code == 9) {
+            int x, y, w, h;
+            dialog_geom(&x, &y, &w, &h);
+            gfx_button_cycle(x, y + h - 36, w, 24, k->shift);
+            gui_invalidate();
+        }
         else if (k->code == 10 || k->code == 13 || k->code == ' ') press_focused_button();
         return;
     }
     if (pick.on) {
         if (k->code == 27) { pick.result = 0; return; }
-        if (k->code == 10 || k->code == 13 || k->code == ' ') { if (pick.count) pick.result = 1; return; }
+        if (k->code == 9) {
+            int x, y, w, h;
+            pick_geom(&x, &y, &w, &h);
+            gfx_button_cycle(x, y + h - 36, w, 24, k->shift);
+            gui_invalidate();
+            return;
+        }
+        if (k->code == 10 || k->code == 13) {
+            int x, y, w, h, bx, by, bw, bh;
+            pick_geom(&x, &y, &w, &h);
+            if (gfx_button_focus_rect(&bx, &by, &bw, &bh) &&
+                by >= y + h - 36 && by < y + h - 12) press_focused_button();
+            else if (pick.count) pick.result = 1;
+            return;
+        }
         if (k->code == KEY_UP && pick.sel > 0) { pick.sel--; gui_invalidate(); }
         if (k->code == KEY_DOWN && pick.sel + 1 < pick.count) { pick.sel++; gui_invalidate(); }
         return;
     }
     if (filedlg.on) {
+        if (k->code == 9) {
+            int x, y, w, h;
+            file_geom(&x, &y, &w, &h);
+            gfx_button_cycle(x, y + h - 36, w, 24, k->shift);
+            gui_invalidate();
+            return;
+        }
         if (k->code == 27) { filedlg.result = 0; return; }
+        if (k->code == ' ') {
+            int x, y, w, h, bx, by, bw, bh;
+            file_geom(&x, &y, &w, &h);
+            if (gfx_button_focus_rect(&bx, &by, &bw, &bh) &&
+                by >= y + h - 36 && by < y + h - 12) {
+                press_focused_button();
+                return;
+            }
+        }
         if (k->code == 10 || k->code == 13) {
+            int x, y, w, h, bx, by, bw, bh;
+            file_geom(&x, &y, &w, &h);
+            if (gfx_button_focus_rect(&bx, &by, &bw, &bh) &&
+                by >= y + h - 36 && by < y + h - 12) {
+                press_focused_button();
+                return;
+            }
             if (filedlg.sel >= 0 && filedlg.sel < filedlg.count && filedlg.isdir[filedlg.sel] && !filedlg.name[0]) {
                 if (filedlg.ids[filedlg.sel] < 0) filedlg.dir = fs_parent(filedlg.dir);
                 else filedlg.dir = (uint16_t)filedlg.ids[filedlg.sel];
@@ -1106,7 +1273,21 @@ static void on_key(KeyEvent *k) {
     }
     if (prompt.on) {
         if (k->code == 27) { prompt.result = 0; return; }
-        if (k->code == 10 || k->code == 13) { prompt.result = 1; return; }
+        if (k->code == 9) {
+            int x, y, w, h;
+            prompt_geom(&x, &y, &w, &h);
+            gfx_button_cycle(x, y + h - 36, w, 24, k->shift);
+            gui_invalidate();
+            return;
+        }
+        if (k->code == 10 || k->code == 13 || k->code == ' ') {
+            int x, y, w, h, bx, by, bw, bh;
+            prompt_geom(&x, &y, &w, &h);
+            if (gfx_button_focus_rect(&bx, &by, &bw, &bh) &&
+                by >= y + h - 36 && by < y + h - 12) press_focused_button();
+            else prompt.result = 1;
+            return;
+        }
         if (k->code == 8) {
             if (prompt.len > 0) prompt.buf[--prompt.len] = 0;
             gui_invalidate();
@@ -1130,16 +1311,78 @@ static void on_key(KeyEvent *k) {
         gui_invalidate();
         return;
     }
+    if (k->ctrl && k->code == 27) {
+        gui_focus_desktop();
+        return;
+    }
     if (k->alt && k->code == KEY_F4) {
         if (focused) request_close(focused);
         return;
     }
-    if ((k->code == ' ' || k->code == 10 || k->code == 13) &&
-        !(focused && focused->text_keys) && gfx_button_focus_rect(0, 0, 0, 0)) {
+    if (menu_on && menu_win) {
+        int count = menu_win->menus[menu_i].count;
+        if (k->code == KEY_LEFT && menu_win->menu_count)
+            menu_i = (menu_i + menu_win->menu_count - 1) % menu_win->menu_count;
+        else if (k->code == KEY_RIGHT && menu_win->menu_count)
+            menu_i = (menu_i + 1) % menu_win->menu_count;
+        else if (k->code == KEY_DOWN && count)
+            menu_hover = menu_hover < 0 ? 0 : (menu_hover + 1) % count;
+        else if (k->code == KEY_UP && count)
+            menu_hover = menu_hover < 0 ? count - 1 : (menu_hover + count - 1) % count;
+        else if ((k->code == 10 || k->code == 13 || k->code == ' ') && count) {
+            if (menu_hover < 0) menu_hover = 0;
+            activate_menu_item();
+            return;
+        }
+        if (k->code == KEY_LEFT || k->code == KEY_RIGHT) menu_hover = -1;
+        gui_invalidate();
+        return;
+    }
+    if (k->alt && focused && focused->menu_count && k->code < 128) {
+        int key = lower_char(k->code);
+        for (int i = 0; i < focused->menu_count; i++) {
+            if (lower_char((unsigned char)focused->menus[i].label[0]) == key) {
+                menu_on = 1;
+                menu_win = focused;
+                menu_i = i;
+                menu_hover = -1;
+                sys_on = 0;
+                gui_invalidate();
+                return;
+            }
+        }
+    }
+    if (!desktop_has_focus && (k->code == ' ' || k->code == 10 || k->code == 13) &&
+        focused && focused_button_in_window(focused)) {
         press_focused_button();
         return;
     }
     if (k->alt && k->code == 9) { cycle_focus(); return; }
+    if (k->code == 9) {
+        if (desktop_has_focus && desktop_event_fn) {
+            Event e;
+            memset(&e, 0, sizeof(e));
+            e.type = EVT_KEY;
+            e.code = k->code;
+            e.shift = k->shift;
+            desktop_event_fn(&e);
+            gui_invalidate();
+            return;
+        }
+        if (focused && focused->used && !focused->minimized) {
+            int x, y, w, h;
+            window_client(focused, &x, &y, &w, &h);
+            if (gfx_button_cycle(x, y, w, h, k->shift)) {
+                gui_invalidate();
+                return;
+            }
+        }
+    }
+    if (k->ctrl && k->code == KEY_F2) { app_write_open(); return; }
+    if (k->ctrl && k->code == KEY_F3) { app_charmap_open(); return; }
+    if (k->ctrl && k->code == KEY_F4) { app_cardfile_open(); return; }
+    if (k->ctrl && k->code == KEY_F5) { app_recovery_open(); return; }
+    if (k->ctrl && k->code == KEY_F6) { app_recycle_open(); return; }
     if (k->code >= KEY_F2 && k->code <= KEY_F12 && launch_fn) {
         launch_fn(k->code - KEY_F2 + 2);
         return;
@@ -1153,6 +1396,16 @@ static void on_key(KeyEvent *k) {
         e.ctrl = k->ctrl;
         e.alt = k->alt;
         send(focused, &e);
+        gui_invalidate();
+    } else if (desktop_has_focus && desktop_event_fn) {
+        Event e;
+        memset(&e, 0, sizeof(e));
+        e.type = EVT_KEY;
+        e.code = k->code;
+        e.shift = k->shift;
+        e.ctrl = k->ctrl;
+        e.alt = k->alt;
+        desktop_event_fn(&e);
         gui_invalidate();
     }
 }

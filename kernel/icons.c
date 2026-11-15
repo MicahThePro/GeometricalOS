@@ -75,6 +75,45 @@ void icons_draw(int id, int x, int y) {
         gfx_fill_circle(x + 25, y + 6, 3, COL_RED);
         return;
     }
+    if (id == ICON_WRITE) {
+        gfx_fill(x + 5, y + 3, 22, 26, COL_WHITE);
+        gfx_rect(x + 5, y + 3, 22, 26, COL_BLACK);
+        gfx_text(x + 8, y + 7, "W", COL_NAVY, COL_WHITE);
+        gfx_hline(x + 8, y + 24, 15, COL_DKGRAY);
+        return;
+    }
+    if (id == ICON_CHARMAP) {
+        gfx_raised(x + 3, y + 3, 26, 26, COL_GRAY);
+        gfx_text(x + 8, y + 7, "A", COL_BLACK, COL_GRAY);
+        gfx_text(x + 17, y + 17, "?", COL_NAVY, COL_GRAY);
+        return;
+    }
+    if (id == ICON_CARDFILE) {
+        gfx_fill(x + 5, y + 5, 23, 24, COL_BLUE);
+        gfx_rect(x + 5, y + 5, 23, 24, COL_BLACK);
+        gfx_fill(x + 2, y + 2, 20, 24, COL_YELLOW);
+        gfx_rect(x + 2, y + 2, 20, 24, COL_BLACK);
+        gfx_hline(x + 6, y + 9, 12, COL_NAVY);
+        gfx_hline(x + 6, y + 14, 12, COL_NAVY);
+        return;
+    }
+    if (id == ICON_RECYCLE) {
+        gfx_raised(x + 5, y + 3, 22, 26, COL_WHITE);
+        gfx_fill(x + 9, y + 9, 14, 15, 0xD0E8F0);
+        gfx_rect(x + 9, y + 9, 14, 15, COL_BLACK);
+        gfx_hline(x + 8, y + 7, 16, COL_BLACK);
+        gfx_line(x + 13, y + 12, x + 19, y + 20, COL_GREEN);
+        gfx_line(x + 19, y + 12, x + 13, y + 20, COL_GREEN);
+        return;
+    }
+    if (id == ICON_SYSTEM) {
+        gfx_fill(x + 3, y + 4, 26, 19, COL_BLACK);
+        gfx_rect(x + 3, y + 4, 26, 19, COL_DKGRAY);
+        gfx_fill(x + 6, y + 7, 20, 13, 0xC0D8D8);
+        gfx_hline(x + 13, y + 24, 7, COL_BLACK);
+        gfx_vline(x + 16, y + 22, 4, COL_BLACK);
+        return;
+    }
     if (id == ICON_MINE) {
         gfx_fill_circle(x + 16, y + 16, 7, COL_BLACK);
         gfx_line(x + 16, y + 3, x + 16, y + 29, COL_BLACK);

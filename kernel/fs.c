@@ -239,6 +239,67 @@ int fs_delete(int inode) {
     return fs_sync();
 }
 
+int fs_recycle_bin(void) {
+    int id = fs_lookup(FS_ROOT, "Recycle Bin");
+    if (id >= 0) return inodes[id].type == 2 ? id : -1;
+    return fs_create_dir(FS_ROOT, "Recycle Bin");
+}
+
+int fs_recycle(int inode) {
+    if (!mounted || inode <= 0 || inode >= INODE_COUNT ||
+        !inodes[inode].type || inode == fs_lookup(FS_ROOT, "Recycle Bin"))
+        return -1;
+    int bin = fs_recycle_bin();
+    if (bin < 0 || inodes[inode].parent == (uint16_t)bin) return -1;
+    inodes[inode].unused[0] = inodes[inode].parent;
+    inodes[inode].parent = (uint16_t)bin;
+    return fs_sync();
+}
+
+int fs_restore(int inode) {
+    if (!mounted || inode <= 0 || inode >= INODE_COUNT || !inodes[inode].type)
+        return -1;
+    int bin = fs_lookup(FS_ROOT, "Recycle Bin");
+    if (bin < 0 || inodes[inode].parent != (uint16_t)bin) return -1;
+    uint16_t parent = (uint16_t)inodes[inode].unused[0];
+    if (parent >= INODE_COUNT || inodes[parent].type != 2) parent = FS_ROOT;
+    if (fs_lookup(parent, inodes[inode].name) >= 0) return -2;
+    inodes[inode].parent = parent;
+    inodes[inode].unused[0] = 0;
+    return fs_sync();
+}
+
+static int inside_directory(int inode, uint16_t dir) {
+    uint16_t parent = inodes[inode].parent;
+    for (int depth = 0; depth < INODE_COUNT && parent != FS_ROOT; depth++) {
+        if (parent == dir) return 1;
+        if (parent >= INODE_COUNT || inodes[parent].type != 2) return 0;
+        parent = inodes[parent].parent;
+    }
+    return 0;
+}
+
+int fs_empty_recycle_bin(void) {
+    int bin = fs_recycle_bin();
+    if (bin < 0) return -1;
+    for (int pass = 0; pass < INODE_COUNT; pass++) {
+        int progress = 0;
+        for (int i = 1; i < INODE_COUNT; i++) {
+            if (!inodes[i].type || !inside_directory(i, (uint16_t)bin)) continue;
+            if (fs_delete(i) == 0) progress = 1;
+        }
+        int remaining = 0;
+        for (int i = 1; i < INODE_COUNT; i++)
+            if (inodes[i].type && inside_directory(i, (uint16_t)bin)) {
+                remaining = 1;
+                break;
+            }
+        if (!remaining) return fs_sync();
+        if (!progress) return -1;
+    }
+    return -1;
+}
+
 int fs_list(uint16_t parent, int *out, int max) {
     int n = 0;
     if (!mounted) return 0;

@@ -11,7 +11,8 @@ It is not Linux. It is a 32-bit freestanding kernel with its own bootloader, a s
 - Eject the CD and boot GeometricalOS from the hard disk.
 - Log on with the name you chose during Setup. A password is optional.
 - Use the mouse and keyboard on a Windows 3.1-style desktop.
-- Open **File Manager, Notepad, Calculator, Clock, Paint, Minesweeper, Terminal, Solitaire, and Snake**.
+- Open **File Manager, Notepad, Write, Character Map, Cardfile, Calculator, Clock, Paint, Minesweeper, Terminal, Solitaire, and Snake**.
+- Arrange desktop shortcuts, recover deleted files, and open the startup recovery tools.
 - Pick a geometric wallpaper, wait for the flying-shapes screensaver, and shut down or restart.
 
 ![Desktop](screenshots/04-desktop.png)
@@ -52,12 +53,13 @@ You do not have to build anything. Use `dist/GeometricalOS.iso`.
 - Graphics controller: **VBoxVGA** or **VBoxSVGA**
 - Video memory: 16 MB is plenty
 - Turn **3D Acceleration** off
+- For live window/fullscreen resizing, enable **View > Auto-resize Guest Display** after the OS starts. GeometricalOS selects a higher-resolution VESA mode when available and handles VirtualBox resize requests up to its framebuffer limit.
 
 ### Audio
 
 - Enable audio
 - Audio controller: **Sound Blaster 16**
-- That plays the startup and shutdown chime through the Sound Blaster. The PC speaker also beeps. If you pick AC'97 or Intel HD Audio instead, you will only get the PC speaker beep, and VirtualBox often does not play that beep.
+- Startup and shutdown chimes and Media Player tunes use the Sound Blaster. Use Control Panel > Sound > **Test** to check it, and make sure Sounds are on and the volume is above zero. The PC speaker also beeps; VirtualBox may not play PC speaker beeps.
 
 ### Storage — this part matters
 
@@ -97,6 +99,10 @@ In System, Motherboard, boot order:
 - Minimized windows sit along the bottom of the desktop. Click one to restore it.
 - Double-click a group icon in Program Manager (**Main**, **Accessories**, **Games**), then double-click a program.
 - **Alt+Tab** cycles windows. **Alt+F4** closes the focused window. On Program Manager, close means exit.
+- **Ctrl+Esc** focuses the desktop shortcuts. Use Tab or the arrow keys to select an icon, then Enter to open it. Drag icons to arrange them; positions are saved.
+- Right-click an empty desktop area for **Sort by Name**, **Sort by Type**, and quick wallpaper choices. Sorted icon positions are saved.
+- **Tab / Shift+Tab** moves focus between buttons. Enter or Space activates the focused button. Use **Alt+F** (or the first letter of another menu) and the arrow keys to navigate menus without a mouse.
+- Press **F8** while the boot report is visible to open Startup Recovery.
 - **File → Exit GeometricalOS** asks Shutdown, Restart, or Cancel. Shutdown shows “It is now safe to turn off your computer.” Press Enter there to try powering off the computer. Restart reboots.
 - The screensaver starts after about 45 seconds with no keyboard or mouse input. Press a key or move the mouse to come back.
 - **Options → Wallpaper** switches between solid teal, tiles, stripes, and diamonds. The choice is saved on disk.
@@ -116,20 +122,36 @@ In System, Motherboard, boot order:
 | F10 | Control Panel |
 | F11 | Media Player |
 | F12 | Snake |
+| Ctrl+F2 | Write |
+| Ctrl+F3 | Character Map |
+| Ctrl+F4 | Cardfile |
+| Ctrl+F5 | System Information and Recovery |
+| Ctrl+F6 | Recycle Bin |
 
 ### The programs
 
 - **Notepad** — File → New, Open, Save, and Save As. The dialog lists folders and files, has a file-name box, and OK / Cancel. Closing a changed document asks whether to save. Files stay on the GeoFS disk across reboots. Open `.TXT` from File Manager.
+- **Write** — a simple word processor with bold, italic, underline, and paragraph alignment. Save and reopen its own `.WRI` format; Ctrl+B/I/U toggle styles, Ctrl+S saves, and Ctrl+V inserts the character selected in Character Map.
+- **Character Map** — browse the printable ASCII characters with the keyboard or mouse, then Copy and paste the selection into Write with Ctrl+V.
+- **Cardfile** — create titled note cards, edit them with the keyboard, and save/open them as `.CRD` files.
 - **Calculator** — mouse or keyboard. `+ - * /`, decimal point, backspace, and C.
 - **Clock** — analog and digital local time. Set the date, time, and fixed UTC offset in Control Panel → Date/Time; the offset is saved in `SETTINGS.CFG` and the date/time are written to the hardware RTC. The RTC is treated as UTC, and daylight-saving transitions are not automatic. A working battery-backed RTC is required to keep time while powered off.
 - **Paint** — Pen, Line, Box, Fill, Clear, and 16 colors. Keys: P, L, B, F, C. File → Save writes a `.GIM` picture. File Manager opens those in Paint. Unsaved changes are asked about on close.
 - **Minesweeper** — beginner 9×9 grid, 10 mines. Left click opens, right click flags. The first click is never a mine. Click the face to start over.
-- **File Manager** — folders and files. Enter a folder, go up, delete, and open `.TXT` files in Notepad or `.GIM` pictures in Paint.
-- **Terminal** — type `help`. Commands: `dir` or `ls`, `cd`, `type` or `cat`, `echo`, `cls`, `mkdir`, `del`, `ver`, `date`, `time`, `shutdown`, and `restart`.
-- **Control Panel** — color scheme, desktop pattern, screensaver, mouse speed and buttons, date/time and fixed UTC offset, and sound. Settings are stored in `SETTINGS.CFG`.
+- **File Manager** — folders and files. Delete moves items to the Recycle Bin; deleting an item from the bin permanently removes it. Open `.TXT` in Notepad, `.WRI` in Write, `.CRD` in Cardfile, and `.GIM` pictures in Paint.
+- **Recycle Bin** — restore selected items to their original folders or empty the bin to permanently free their disk space. Restoring is refused if the original name is already in use.
+- **Terminal** — type `help`. Commands: `dir` or `ls`, `cd`, `type` or `cat`, `echo`, `cls`, `mkdir`, `del` (moves to Recycle Bin), `ver`, `date`, `time`, `shutdown`, and `restart`.
+- **Control Panel** — color scheme, desktop pattern, screensaver, mouse speed and buttons, date/time and fixed UTC offset, sound, and settings recovery. Display, mouse, sound, clock, wallpaper, and icon-position settings are stored together in `SETTINGS.CFG`; the previous saved settings are kept in `SETTINGS.BAK`.
+- **System Information and Recovery** — show BIOS/video/disk details, restore the last saved settings, or reset settings to defaults. Press F8 during startup for Safe Mode, diagnostics, and settings recovery.
 - **Media Player** — Play, Pause, and Stop for five short built-in tunes, with a position bar. Sound Blaster 16 plays them when that card is selected; otherwise the PC speaker does.
 - **Solitaire** — Klondike, one card at a time. Click the deck to draw. Click a card, then a pile, to move it. Double-click a card to file it on a foundation when the rules allow. Press N for a new game.
 - **Snake** — steer with the arrow keys or WASD, eat the apples to grow, and avoid the walls and your tail. Press Space to pause or N to start a new game.
+
+## Run GeometricalOS in a browser
+
+Open the downloaded `index.html` directly, or host it as a static page. No local ISO or other project files are required: the page downloads the installer ISO from this repository's `main` branch on GitHub and loads v86 and its BIOS from public CDNs. The browser needs internet access to start; the guest itself has no configured network adapter.
+
+Start the VM to boot the GitHub-hosted installer ISO into Setup. Click inside the VM display to capture the mouse; press **Esc** to release it. Install to the provided 32 MiB IDE disk, eject the installer disc, and reboot. Disk changes autosave in browser storage; use **Download backup** to keep a portable raw `.img` copy.
 
 ## Build it yourself (Linux or WSL)
 
@@ -143,7 +165,7 @@ make
 
 `make` writes `dist/GeometricalOS.iso`. `make run` boots that ISO in QEMU. `make clean` deletes the build files.
 
-The kernel is freestanding C and NASM. It enters 32-bit protected mode, sets a VESA graphics mode (it prefers 800×600 with 32-bit color), and does not use the Linux kernel or GRUB.
+The kernel is freestanding C and NASM. It enters 32-bit protected mode, sets a VESA graphics mode (it prefers 1280×720 when available), and does not use the Linux kernel or GRUB.
 
 ## How the disk is laid out
 
@@ -161,7 +183,7 @@ The kernel is freestanding C and NASM. It enters 32-bit protected mode, sets a V
 | The screen stays on a line that starts with `GeometricalOS:` | That line is the last step that finished. `loading from CD` means the disc read failed (check that the ISO is the IDE Secondary Master). `setting VESA mode` with a black screen after it means the graphics card has no linear framebuffer; use VBoxVGA or VBoxSVGA with 3D acceleration off. |
 | Black screen and no text at all | Use the ISO from this fix. Older builds asked VirtualBox to load the CD at a segment it does not support, so Setup never started. |
 | Mouse does not move | Pointing device must be **PS/2 Mouse**. GeometricalOS also asks VirtualBox for an absolute pointer, so the cursor can follow the host without capture when that device answers. |
-| No startup chime | Set the audio controller to **Sound Blaster 16**. |
+| No sound | Enable audio and set the controller to **Sound Blaster 16**. In Control Panel > Sound, turn Sounds on, raise the volume, and press **Test**. |
 | It boots the installer again | Remove the ISO, then reboot. |
 | “This hard disk is not installed” | Boot the ISO and run Setup on that disk. |
 | The name or password is rejected | It must match what Setup saved. The default name, if you just pressed Enter, is `User` with no password. |
@@ -172,4 +194,4 @@ The same IDE layout VirtualBox uses was tested with QEMU: hard disk on the prima
 
 ## Limits
 
-No networking or Internet access is implemented. One IDE disk, no USB, no sound card besides Sound Blaster 16 and the PC speaker, and deleted files do not always reuse their disk space until you install again.
+No networking or Internet access is implemented. One IDE disk, no USB, and no sound card besides Sound Blaster 16 and the PC speaker. Items in the Recycle Bin continue to use disk space until the bin is emptied.

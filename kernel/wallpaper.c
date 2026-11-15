@@ -1,32 +1,20 @@
 #include "wallpaper.h"
 #include "gui.h"
 #include "gfx.h"
-#include "fs.h"
 #include "io.h"
 #include "settings.h"
 
 static int wall_id;
 
-static void wall_store(void) {
-    char b[4] = {(char)('0' + wall_id), '\n', 0, 0};
-    fs_write(FS_ROOT, "WALL.CFG", b, 2);
-}
-
 void wall_load(void) {
-    wall_id = 0;
-    int id = fs_lookup(FS_ROOT, "WALL.CFG");
-    if (id < 0) return;
-    char b[8];
-    uint32_t n = 0;
-    if (fs_read(id, b, 7, &n) == 0 && b[0] >= '0' && b[0] <= '3')
-        wall_id = b[0] - '0';
+    wall_id = settings_wallpaper();
 }
 
 void wall_set(int id) {
     if (id < 0) id = 0;
     if (id > 3) id = 3;
     wall_id = id;
-    wall_store();
+    settings_set_wallpaper(id);
 }
 
 int wall_get(void) { return wall_id; }
@@ -75,8 +63,7 @@ static void wall_event(Window *w, Event *e) {
         for (int i = 0; i < 4; i++) {
             int y = 36 + i * 36;
             if (e->x >= 16 && e->x < cw - 16 && e->y >= y && e->y < y + 30) {
-                wall_id = i;
-                wall_store();
+                wall_set(i);
                 gui_invalidate();
                 return;
             }
