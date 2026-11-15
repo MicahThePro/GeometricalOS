@@ -19,7 +19,7 @@ C_SRCS := \
 	kernel/ata.c kernel/fs.c kernel/gui.c kernel/icons.c kernel/power.c \
 	kernel/app_notepad.c kernel/app_calc.c kernel/app_clock.c kernel/app_paint.c \
 	kernel/app_mines.c kernel/app_files.c kernel/app_term.c kernel/app_sol.c \
-	kernel/sound.c kernel/wallpaper.c kernel/login.c \
+	kernel/sound.c kernel/wallpaper.c kernel/login.c kernel/font8x16_fallback.c \
 	kernel/desktop.c kernel/setup.c \
 	kernel/main.c
 
@@ -71,10 +71,12 @@ dist/GeometricalOS.iso: $(BUILD)/bootimg.bin | $(BUILD)
 	rm -rf iso_root
 	mkdir -p iso_root dist
 	cp $(BUILD)/bootimg.bin iso_root/bootimg.bin
-	sectors=$$(( ($$(stat -c%s iso_root/bootimg.bin) + 511) / 512 )); \
+	bytes=$$(stat -c%s iso_root/bootimg.bin); \
+	sectors=$$(( (bytes + 2047) / 2048 * 4 )); \
+	echo "El Torito load sectors (512-byte, multiple of 4): $$sectors"; \
 	genisoimage -quiet -V GEOMETRICALOS \
 	  -b bootimg.bin -c boot.cat \
-	  -no-emul-boot -boot-load-size $$sectors -boot-load-seg 0x1000 \
+	  -no-emul-boot -boot-load-size $$sectors -boot-load-seg 0x07C0 \
 	  -boot-info-table \
 	  -o dist/GeometricalOS.iso iso_root
 	@echo "ISO dist/GeometricalOS.iso"

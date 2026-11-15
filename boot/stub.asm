@@ -19,67 +19,364 @@ bi_csum:   dd 0
 image_bytes: dd 0
     times 64 - ($ - $$) db 0
 
-; BIOS enters at the load segment with IP = 0. Copy the image to 0x10000 if
-; it was not already loaded there, then continue with CS = 0x1000.
+; BIOS enters with IP = 0. VirtualBox only promises load segment 0x07C0 and may
+; not load the whole image, so on CD boot this loader (which must fit in the
+; first 2048 bytes) reads the full file to 0x10000 with INT 13h, then jumps
+; there. The hard-disk MBR has already loaded the image and set the GEO1 mark.
 relocate:
     cli
     cld
-    xor eax, eax
-    mov ax, cs
-    shl eax, 4
-    cmp eax, 0x10000
-    je already_loaded
-
-    mov bx, image_bytes
-    mov ecx, [cs:bx]
-    add ecx, 511
-    and ecx, 0xFFFFFE00
-    test ecx, ecx
-    jz already_loaded
-
-    mov esi, eax
-    mov edi, 0x10000
     xor ax, ax
     mov ss, ax
-    mov sp, 0x700
+    mov sp, 0x7000
+    mov ds, ax
+    push dx
+    ; COM1, so a hang is visible even when the screen is still blank.
+    mov dx, 0x3F8 + 3
+    mov al, 0x80
+    out dx, al
+    mov dx, 0x3F8
+    mov al, 1
+    out dx, al
+    mov dx, 0x3F8 + 1
+    xor al, al
+    out dx, al
+    mov dx, 0x3F8 + 3
+    mov al, 0x03
+    out dx, al
+    mov al, 'L'
+    call early_putc
+    ; SeaBIOS rewrites load segment 0x07C0 as 0000:7C00. Rebuild a segment
+    ; that actually points at this image before touching CS-relative data.
+    call .ip
+.ip:
+    pop ax
+    xor ebx, ebx
+    mov bx, cs
+    shl ebx, 4
+    movzx eax, ax
+    add ebx, eax
+    sub ebx, (.ip - $$)
+    shr ebx, 4
+    mov ax, bx
+    push ax
+    push word after_norm
+    retf
 
-.loop:
-    test ecx, ecx
-    jz .copied
-    mov dword [ss:0x500], esi
-    mov dword [ss:0x504], edi
-    mov dword [ss:0x508], ecx
-
-    mov eax, esi
-    shr eax, 4
+after_norm:
+    pop dx
+    mov [cs:saved_drive], dl
+    push dx
+    mov al, 'N'
+    call early_putc
+    ; BIOS disk services scratch 0000:7C00. Run the loader from 0x60000.
+    mov ax, cs
     mov ds, ax
     xor si, si
-    mov ax, 0x0080
+    mov ax, 0x6000
     mov es, ax
     xor di, di
-    mov cx, 256
+    mov cx, 1024
     rep movsw
+    jmp 0x6000:after_move
 
-    mov eax, [ss:0x504]
-    shr eax, 4
-    mov es, ax
-    xor di, di
-    mov ax, 0x0080
+after_move:
+    pop dx
+    xor ax, ax
     mov ds, ax
-    xor si, si
-    mov cx, 256
-    rep movsw
-
-    mov esi, [ss:0x500]
-    mov edi, [ss:0x504]
-    mov ecx, [ss:0x508]
-    add esi, 512
-    add edi, 512
-    sub ecx, 512
-    jmp .loop
-
-.copied:
+    mov [0x0510], dl
+    mov al, 'M'
+    call early_putc
+    mov es, ax
+    sti
+    cmp dword [0x0500], 0x314F4547
+    jne cd_boot
     jmp 0x1000:already_loaded
+
+cd_boot:
+    mov al, 'C'
+    call early_putc
+    mov al, [cs:saved_drive]
+    call early_hex
+    mov ax, 0x0003
+    int 0x10
+    mov si, msg_cd
+    call bios_puts
+
+    mov ah, 0x41
+    mov bx, 0x55AA
+    mov dl, [cs:saved_drive]
+    int 0x13
+    jnc .ext_ok
+    mov al, 'e'
+    call early_putc
+    mov al, ah
+    call early_hex
+    jmp .have_lba
+.ext_ok:
+    cmp bx, 0xAA55
+    je .have_lba
+    mov al, 'b'
+    call early_putc
+.have_lba:
+
+    mov eax, [cs:bi_length]
+    test eax, eax
+    jz cd_fail
+    mov [cs:saved_len], eax
+    mov al, [cs:0x200]
+    mov [cs:saved_mark], al
+    mov eax, [cs:bi_file]
+    mov [cs:saved_lba], eax
+
+    ; BIOS CD reads are 2048 bytes/sector on SeaBIOS and 512 on the Bochs
+    ; BIOS that VirtualBox ships. A one-byte signature cannot tell them apart,
+    ; so compare offset 0x200 of a candidate read with this loader.
+    mov eax, [cs:saved_lba]
+    mov cx, 1
+    mov bx, 0x0900
+    call read_lba
+    mov al, 0
+    cmp byte [cs:read_err], 0
+    jne .no2048
+    cmp byte [0x9000], 0xEB
+    jne .no2048
+    mov al, [0x9200]
+    cmp al, [cs:saved_mark]
+    jne .no2048
+    mov byte [cs:saved_mode], 1
+    mov eax, [cs:saved_lba]
+    mov [cs:saved_pos], eax
+    mov al, '2'
+    call early_putc
+    jmp .load
+.no2048:
+    mov eax, [cs:saved_lba]
+    shl eax, 2
+    mov [cs:saved_pos], eax
+    mov cx, 4
+    mov bx, 0x0980
+    call read_lba
+    cmp byte [cs:read_err], 0
+    jne cd_fail
+    cmp byte [0x9800], 0xEB
+    jne cd_fail
+    mov al, [0x9A00]
+    cmp al, [cs:saved_mark]
+    jne cd_fail
+    mov byte [cs:saved_mode], 0
+    mov al, '5'
+    call early_putc
+
+.load:
+    mov eax, [cs:saved_len]
+    cmp byte [cs:saved_mode], 0
+    jne .sz2048
+    add eax, 511
+    shr eax, 9
+    jmp .have_count
+.sz2048:
+    add eax, 2047
+    shr eax, 11
+.have_count:
+    cmp ax, 256
+    jbe .count_cap
+    mov ax, 256
+.count_cap:
+    mov [cs:saved_count], ax
+    xor bp, bp
+.chunk:
+    cmp bp, [cs:saved_count]
+    jae .loaded
+    mov ax, bp
+    mov cl, 7
+    cmp byte [cs:saved_mode], 0
+    jne .shift
+    mov cl, 5
+.shift:
+    shl ax, cl
+    add ax, 0x1000
+    mov bx, ax
+    mov eax, [cs:saved_pos]
+    movzx edx, bp
+    add eax, edx
+    mov cx, 1
+    call read_lba
+    jc cd_fail
+    inc bp
+    jmp .chunk
+
+.loaded:
+    mov ax, 0x1000
+    mov ds, ax
+    cmp byte [ds:0], 0xEB
+    jne cd_fail
+    mov ax, 0x1200
+    mov ds, ax
+    cmp byte [ds:0], 0xFC
+    jne cd_fail
+    xor ax, ax
+    mov ds, ax
+    mov si, msg_ok
+    call bios_puts
+    mov al, 'K'
+    call early_putc
+    jmp 0x1000:already_loaded
+
+cd_fail:
+    mov al, 'X'
+    call early_putc
+    mov bl, ah
+    xor ax, ax
+    mov ds, ax
+    mov [0x04F2], bl
+    mov si, msg_err
+    call bios_puts
+    mov al, bl
+    call put_hex8
+    cli
+.hang:
+    hlt
+    jmp .hang
+
+; EAX = LBA, CX = sector count, BX = destination segment, DL = drive.
+; DS must be 0. Preserves EAX. Returns CF set on error, AH = BIOS status.
+; EAX = LBA, CX = count, BX = destination segment. Returns CF set on error.
+; Returns with DS = 0 and EAX preserved.
+read_lba:
+    push ds
+    push si
+    push eax
+    mov si, cs
+    mov ds, si
+    pop eax
+    mov word [dap_pkt], 0x0010
+    mov [dap_pkt + 2], cx
+    mov word [dap_pkt + 4], 0
+    mov [dap_pkt + 6], bx
+    mov [dap_pkt + 8], eax
+    mov dword [dap_pkt + 12], 0
+    push eax
+    mov si, dap_pkt
+    mov dl, [cs:saved_drive]
+    mov ah, 0x42
+    int 0x13
+    mov [cs:read_status], ah
+    mov byte [cs:read_err], 0
+    jnc .read_ok
+    mov byte [cs:read_err], 1
+.read_ok:
+    pop eax
+    pushf
+    xor si, si
+    mov ds, si
+    popf
+    pop si
+    pop ax
+    ret
+
+dap_pkt: times 16 db 0
+saved_drive: db 0
+saved_mode:  db 0
+saved_mark:  db 0
+read_status: db 0
+read_err:    db 0
+saved_lba:   dd 0
+saved_pos:   dd 0
+saved_len:   dd 0
+saved_count: dw 0
+
+early_putc:
+    push dx
+    push ax
+    mov dx, 0x3F8 + 5
+.wait:
+    in al, dx
+    test al, 0x20
+    jz .wait
+    pop ax
+    mov dx, 0x3F8
+    out dx, al
+    pop dx
+    ret
+
+early_hex:
+    push ax
+    push cx
+    mov ah, al
+    mov cx, 2
+.n:
+    rol ah, 4
+    mov al, ah
+    and al, 0x0F
+    cmp al, 10
+    jb .d
+    add al, 'A' - 10
+    jmp .o
+.d:
+    add al, '0'
+.o:
+    call early_putc
+    loop .n
+    pop cx
+    pop ax
+    ret
+
+bios_puts:
+    push ax
+    push bx
+    push si
+.char:
+    mov al, [cs:si]
+    inc si
+    test al, al
+    jz .done
+    mov ah, 0x0E
+    mov bx, 0x0007
+    int 0x10
+    jmp .char
+.done:
+    pop si
+    pop bx
+    pop ax
+    ret
+
+put_hex8:
+    push ax
+    push cx
+    mov ah, al
+    mov cx, 2
+.nyb:
+    rol ah, 4
+    mov al, ah
+    and al, 0x0F
+    cmp al, 10
+    jb .dig
+    add al, 'A' - 10
+    jmp .out
+.dig:
+    add al, '0'
+.out:
+    push ax
+    push bx
+    mov ah, 0x0E
+    mov bx, 0x0007
+    int 0x10
+    pop bx
+    pop ax
+    loop .nyb
+    pop cx
+    pop ax
+    ret
+
+msg_cd:  db "GeometricalOS: loading from CD...", 13, 10, 0
+msg_ok:  db "GeometricalOS: CD image OK", 13, 10, 0
+msg_err: db "GeometricalOS: CD read failed, BIOS status ", 0
+
+loader_end:
+%if (loader_end - $$) > 2048
+%error "CD loader must fit in the first 2048 bytes"
+%endif
 
 already_loaded:
     cli
@@ -94,8 +391,15 @@ already_loaded:
 
     call serial_init
     call sputc_A
+    mov si, msg_start
+    call bios_puts
 
     ; Preserve the BIOS boot drive, then consume the HDD-boot signature.
+    xor ax, ax
+    mov ds, ax
+    mov dl, [0x0510]
+    mov ax, cs
+    mov ds, ax
     mov [boot_drive], dl
     xor ax, ax
     mov es, ax
@@ -112,8 +416,12 @@ already_loaded:
     mov es, ax
 
     call sputc_B
+    mov si, msg_font
+    call bios_puts
     call copy_font
     call sputc_C
+    mov si, msg_video
+    call bios_puts
     call set_video
     cmp byte [video_ok], 1
     je .video_good
@@ -252,6 +560,8 @@ set_video:
     int 0x10
     mov bx, cs
     mov ds, bx
+    xor bx, bx
+    mov es, bx
     cmp ax, 0x004F
     jne .no_list
 
@@ -325,13 +635,8 @@ consider_mode:
     mov al, [es:0x3000]
     test al, 0x01
     jz .skip
-    test al, 0x10
+    test al, 0x80                ; linear framebuffer
     jz .skip
-    test al, 0x80
-    jz .skip
-    mov al, [es:0x3000 + 0x1B]
-    cmp al, 6                    ; direct-color packed pixel
-    jne .skip
     mov al, [es:0x3000 + 0x19]   ; bpp
     mov bl, 0
     cmp al, 32
@@ -420,6 +725,10 @@ read_mode_info:
     ret
 
 video_fail:
+    mov ax, 0x0003
+    int 0x10
+    mov ax, cs
+    mov ds, ax
     mov si, failmsg
 .p:
     mov al, [cs:si]
@@ -439,6 +748,9 @@ video_fail:
     hlt
     jmp .hang
 
+msg_start: db "GeometricalOS: starting kernel", 13, 10, 0
+msg_font:  db "GeometricalOS: copying font", 13, 10, 0
+msg_video: db "GeometricalOS: setting VESA mode", 13, 10, 0
 failmsg:
     db "GeometricalOS needs a VESA linear framebuffer (640x480 or larger).", 13, 10
     db "In VirtualBox use VBoxVGA or VBoxSVGA with 3D acceleration off.", 13, 10, 0

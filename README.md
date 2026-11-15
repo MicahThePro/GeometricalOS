@@ -154,7 +154,8 @@ The kernel is freestanding C and NASM. It enters 32-bit protected mode, sets a V
 | --- | --- |
 | “No hard disk” or Setup never sees a disk | The hard disk must be the **IDE Primary Master**. A SATA or NVMe disk will not work. |
 | Setup says the primary master is the CD | Put the ISO on the **Secondary Master**, not the primary master. |
-| Black screen or “VESA” message | Use VBoxVGA or VBoxSVGA and turn 3D acceleration off. |
+| The screen stays on a line that starts with `GeometricalOS:` | That line is the last step that finished. `loading from CD` means the disc read failed (check that the ISO is the IDE Secondary Master). `setting VESA mode` with a black screen after it means the graphics card has no linear framebuffer; use VBoxVGA or VBoxSVGA with 3D acceleration off. |
+| Black screen and no text at all | Use the ISO from this fix. Older builds asked VirtualBox to load the CD at a segment it does not support, so Setup never started. |
 | Mouse does not move | Pointing device must be **PS/2 Mouse**, not a USB tablet. |
 | No startup chime | Set the audio controller to **Sound Blaster 16**. |
 | It boots the installer again | Remove the ISO, then reboot. |
