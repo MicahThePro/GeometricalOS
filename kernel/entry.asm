@@ -1,0 +1,22 @@
+[bits 32]
+section .note.GNU-stack noalloc noexec nowrite progbits
+section .text.entry
+global _start
+extern kmain
+extern bss_start
+extern bss_end
+
+_start:
+    cld
+    mov edi, bss_start
+    mov ecx, bss_end
+    sub ecx, edi
+    xor eax, eax
+    rep stosb
+    mov esp, 0x90000
+    and esp, 0xFFFFFFF0
+    call kmain
+.hang:
+    cli
+    hlt
+    jmp .hang
