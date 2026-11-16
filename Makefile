@@ -16,11 +16,11 @@ LIBGCC  := $(shell $(CC) -m32 -print-libgcc-file-name)
 
 C_SRCS := \
 	kernel/string.c kernel/serial.c kernel/gfx.c kernel/input.c kernel/rtc.c \
-	kernel/ata.c kernel/fs.c kernel/gui.c kernel/icons.c kernel/power.c \
+	kernel/ata.c kernel/fs.c kernel/gui.c kernel/icons.c kernel/power.c kernel/pcnet.c kernel/net.c \
 	kernel/app_notepad.c kernel/app_calc.c kernel/app_clock.c kernel/app_paint.c \
 	kernel/app_mines.c kernel/app_files.c kernel/app_term.c kernel/app_sol.c kernel/app_snake.c \
 	kernel/app_recycle.c kernel/app_write.c kernel/app_charmap.c kernel/app_cardfile.c kernel/app_recovery.c \
-	kernel/app_tools.c \
+	kernel/app_tools.c kernel/app_ftp.c \
 	kernel/sound.c kernel/wallpaper.c kernel/login.c kernel/font8x16_fallback.c \
 	kernel/desktop.c kernel/setup.c kernel/pci.c kernel/vmm.c \
 	kernel/settings.c kernel/app_control.c kernel/app_player.c \

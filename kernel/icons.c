@@ -216,5 +216,16 @@ void icons_draw(int id, int x, int y) {
         gfx_fill(x + 15, y + 5, 2, 4, COL_NAVY);
         return;
     }
+    if (id == ICON_FTP) {
+        gfx_fill(x + 3, y + 3, 26, 26, COL_NAVY);
+        gfx_rect(x + 3, y + 3, 26, 26, COL_BLACK);
+        gfx_fill(x + 7, y + 7, 18, 18, COL_WHITE);
+        gfx_rect(x + 7, y + 7, 18, 18, COL_BLACK);
+        gfx_hline(x + 10, y + 12, 12, COL_GREEN);
+        gfx_hline(x + 10, y + 17, 12, COL_GREEN);
+        gfx_hline(x + 10, y + 22, 12, COL_GREEN);
+        gfx_text(x + 13, y + 9, ">", COL_RED, COL_WHITE);
+        return;
+    }
     frame(x, y);
 }

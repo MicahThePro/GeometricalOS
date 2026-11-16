@@ -29,6 +29,8 @@ void app_recycle_open(void);
 void app_recovery_open(void);
 void app_control_open(void);
 void app_player_open(void);
+void app_ftp_open(void);
+void ftp_server_poll(void);
 int login_screen(void);
 
 void desktop_init(void);

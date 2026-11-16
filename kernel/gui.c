@@ -1525,6 +1525,7 @@ void gui_pump(void) {
     int ox = mouse_x, oy = mouse_y;
     int activity = 0;
     input_poll();
+    ftp_server_poll();
     MouseEvent m;
     while (input_mouse(&m)) {
         activity = 1;

@@ -6,6 +6,8 @@
 #include "io.h"
 #include "serial.h"
 
+#define FILE_MANAGER_REFRESH_TICKS 100u
+
 static Window *win;
 static uint16_t cwd = FS_ROOT;
 static int ids[160];
@@ -142,6 +144,10 @@ static void files_event(Window *w, Event *e) {
     window_client(w, &cx, &cy, &cw, &ch);
     int rows = (ch - 48) / 18;
     if (rows < 1) rows = 1;
+    if (e->type == EVT_TIMER) {
+        reload();
+        return;
+    }
     if (e->type == EVT_PAINT) {
         gfx_fill(cx, cy, cw, ch, COL_WHITE);
         gfx_fill(cx, cy, cw, 18, COL_GRAY);
@@ -264,6 +270,7 @@ void app_files_open(void) {
     if (wh > gfx_height() - 16) wh = gfx_height() - 16;
     win = gui_create("File Manager", ww, wh, ICON_FILES, files_event, &win);
     if (!win) return;
+    gui_set_timer(win, FILE_MANAGER_REFRESH_TICKS);
     window_add_menu(win, "File");
     window_add_item(win, 0, "Open", 1);
     window_add_item(win, 0, "Up", 2);

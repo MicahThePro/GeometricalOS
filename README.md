@@ -112,6 +112,24 @@ In System, Motherboard, boot order:
 - The screensaver starts after about 45 seconds with no keyboard or mouse input. Press a key or move the mouse to come back.
 - **Options → Wallpaper** switches between solid, tiles, stripes, diamonds, and Orbit Grid. The choice is saved on disk.
 
+### Transfer files with FileZilla
+
+The **FTP Server** utility shares only the `Transfer` folder with FileZilla. It uses anonymous, unencrypted FTP, so keep the VM adapter on a private **Host-only Adapter** network. Do not use Bridged networking or expose/forward FTP ports to the Internet.
+
+1. Shut down the VM. In VirtualBox **Settings → Network → Adapter 1**, enable the adapter, choose **Host-only Adapter**, and select the host-only network interface.
+2. In **Advanced → Adapter Type**, choose **PCnet-FAST III (Am79C973)**. Make sure **Cable Connected** is checked.
+3. The server uses guest address `192.168.56.2/24` and passive ports `50000-50003`. Set or confirm the Windows host-only adapter address is `192.168.56.1` with mask `255.255.255.0`. The guest does not use DHCP.
+4. Start GeometricalOS and open **GeoDeck → Utilities → FTP Server**. Leave the window running; it reports whether the PCnet card was detected.
+5. In FileZilla Client's Site Manager, use:
+   - Protocol: **FTP - File Transfer Protocol**
+   - Host: `192.168.56.2`; Port: `21`
+   - Encryption: **Only use plain FTP (insecure)**
+   - Logon type: **Anonymous**
+   - Transfer Settings: **Passive**
+6. Connect. The server's `/` is the GeometricalOS `Transfer` folder. Use File Manager to put files there before connecting, or drag files in FileZilla to upload them. The File Manager refreshes an open folder every second. FileZilla cannot receive directory-change notifications over FTP, so press F5 in its remote pane to see files added from GeometricalOS. Downloads are limited to files in `Transfer`. Individual files are limited to 140 KiB by GeoFS.
+
+Plain FTP does not encrypt files or credentials. Use this only on the private Host-only link and stop the server when finished. The minimal PCnet/IP/TCP implementation is intended for this VirtualBox adapter and does not provide DHCP, Internet routing, TLS, or active FTP.
+
 ### Keyboard shortcuts
 
 | Key | Program |
@@ -150,12 +168,13 @@ In System, Motherboard, boot order:
 - **Recent Documents** — reopen the ten most recently opened text, Write, Paint, and Cardfile documents. Recycled, missing, or renamed entries are ignored.
 - **Run** — launch an app by name or open a supported document by its exact file name.
 - **Help** — offline guides for each app, keyboard shortcuts, and common fixes.
-- **Disk Space & Backup** — view GeoFS used/free space and create or restore a `Backups\Latest` snapshot. This snapshot is stored on the same virtual disk, so it does not protect against disk loss. In the browser version, use **Download backup** to save a portable copy outside the virtual disk.
+- **Disk Space & Backup** — view the detected disk's total capacity, boot/system image, GeoFS metadata and files, reserved space, and free GeoFS capacity. Create or restore a `Backups\Latest` snapshot; it is stored on the same virtual disk, so keep another copy elsewhere to protect against disk loss. In the browser version, use **Download backup** for a portable raw-disk copy.
 - **Recycle Bin** — restore selected items to their original folders or empty the bin to permanently free their disk space. Restoring is refused if the original name is already in use.
 - **Terminal** — type `help`. Commands: `dir` or `ls`, `cd`, `type` or `cat`, `echo`, `cls`, `mkdir`, `del` (moves to Recycle Bin), `ver`, `date`, `time`, `shutdown`, and `restart`.
 - **Control Panel** — color scheme, desktop pattern, screensaver, mouse speed and buttons, date/time and fixed UTC offset, sound (full volume by default), and settings recovery. Display, mouse, sound, clock, wallpaper, and icon-position settings are stored together in `SETTINGS.CFG`; the previous saved settings are kept in `SETTINGS.BAK`.
 - **System Information and Recovery** — show BIOS/video/disk details, restore the last saved settings, or reset settings to defaults. Press F8 during startup for Safe Mode, diagnostics, and settings recovery.
 - **Media Player** — Play, Pause, and Stop for five short built-in tunes, with a position bar. Sound Blaster 16 plays them when that card is selected; otherwise the PC speaker does.
+- **FTP Server** — transfer files with FileZilla over a VirtualBox Host-only network. Anonymous plain FTP is restricted to the `Transfer` folder; use it only on a private network.
 - **Solitaire** — Klondike, one card at a time. Click the deck to draw. Click a card, then a pile, to move it. Double-click a card to file it on a foundation when the rules allow. Press N for a new game.
 - **Snake** — steer with the arrow keys or WASD, eat the apples to grow, and avoid the walls and your tail. Press Space to pause or N to start a new game.
 

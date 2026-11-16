@@ -27,7 +27,8 @@ enum {
     ICON_HELP,
     ICON_STORAGE,
     ICON_WALLPAPER,
-    ICON_MOUSE
+    ICON_MOUSE,
+    ICON_FTP
 };
 
 enum {

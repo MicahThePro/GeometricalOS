@@ -4,6 +4,15 @@
 #include <stdint.h>
 
 #define FS_ROOT 0
+#define FS_MAX_FILE_BYTES (280u * 512u)
+
+typedef struct {
+    uint32_t disk_sectors;
+    uint32_t start_sector;
+    uint32_t metadata_sectors;
+    uint32_t data_blocks;
+    uint32_t used_blocks;
+} FsSpaceInfo;
 
 int fs_format(uint32_t disk_sectors);
 int fs_mount(void);
@@ -22,7 +31,7 @@ int fs_move(int inode, uint16_t parent);
 int fs_copy(int inode, uint16_t parent);
 int fs_copy_as(int inode, uint16_t parent, const char *name);
 int fs_restore_tree(int source_dir, uint16_t dest_dir);
-int fs_get_space(uint32_t *total_bytes, uint32_t *used_bytes);
+int fs_get_space(FsSpaceInfo *info);
 int fs_empty_recycle_bin(void);
 int fs_recycle_bin(void);
 int fs_list(uint16_t parent, int *out, int max);

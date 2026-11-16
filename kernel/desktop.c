@@ -69,6 +69,7 @@ static const Prog acc_items[] = {
     {"Run...", ICON_RUN, app_run_open},
     {"Help", ICON_HELP, app_help_open},
     {"Disk Space & Backup", ICON_STORAGE, app_storage_open},
+    {"FTP Server", ICON_FTP, app_ftp_open},
 };
 static const Prog game_items[] = {
     {"Minesweeper", ICON_MINE, app_mines_open},
@@ -78,7 +79,7 @@ static const Prog game_items[] = {
 
 static const Prog *group_items(int g, int *n) {
     if (g == 0) { *n = 2; return main_items; }
-    if (g == 1) { *n = 16; return acc_items; }
+    if (g == 1) { *n = 17; return acc_items; }
     *n = 3;
     return game_items;
 }
@@ -282,7 +283,7 @@ static void pm_event(Window *w, Event *e) {
                        "A tiny hobby operating system\n"
                        "inspired by Windows 3.1.\n\n"
                        "Write, Character Map, Cardfile,\n"
-                       "GeoFind, Run, Help, Backups,\n"
+                       "GeoFind, Run, Help, Backups, FTP,\n"
                        "Snake, Solitaire, Calculator,\n"
                        "Clock, Paint, and files.",
                        "OK", 0, 0);
