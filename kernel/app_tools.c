@@ -61,11 +61,17 @@ static int supported_document(int inode) {
     if (inode <= 0 || inode >= 160 || fs_type(inode) != 1) return 0;
     const char *name = fs_name(inode);
     int n = (int)strlen(name);
-    return (n >= 4 &&
-            (strcasecmp(name + n - 4, ".TXT") == 0 ||
-             strcasecmp(name + n - 4, ".WRI") == 0 ||
-             strcasecmp(name + n - 4, ".GIM") == 0 ||
-             strcasecmp(name + n - 4, ".CRD") == 0));
+    if (n >= 4 &&
+        (strcasecmp(name + n - 4, ".TXT") == 0 ||
+         strcasecmp(name + n - 4, ".WRI") == 0 ||
+         strcasecmp(name + n - 4, ".GIM") == 0 ||
+         strcasecmp(name + n - 4, ".CRD") == 0 ||
+         strcasecmp(name + n - 4, ".PNG") == 0 ||
+         strcasecmp(name + n - 4, ".JPG") == 0))
+        return 1;
+    return n >= 5 &&
+           (strcasecmp(name + n - 5, ".JPEG") == 0 ||
+            strcasecmp(name + n - 5, ".WEBP") == 0);
 }
 
 static int in_recycle_bin(int inode) {
@@ -246,6 +252,8 @@ static int run_application(const char *command) {
     else if (strcasecmp(command, "Calculator") == 0) app_calc_open();
     else if (strcasecmp(command, "Clock") == 0) app_clock_open();
     else if (strcasecmp(command, "Paint") == 0) app_paint_open();
+    else if (strcasecmp(command, "Image Viewer") == 0 ||
+             strcasecmp(command, "Images") == 0) app_image_open();
     else if (strcasecmp(command, "Terminal") == 0) app_term_open();
     else if (strcasecmp(command, "Minesweeper") == 0) app_mines_open();
     else if (strcasecmp(command, "Solitaire") == 0) app_sol_open();
@@ -283,15 +291,17 @@ void app_run_open(void) {
 }
 
 static const HelpTopic help_topics[] = {
-    {"File Manager", "Open a folder with a double-click. Use Up or Backspace to return. "
-     "Select an item, then use Edit > Cut, Copy, and Paste to move or duplicate it. "
-     "F2 renames the selected item. Delete sends it to the Recycle Bin."},
+    {"File Manager", "Open folders with a double-click; use Up or Backspace to return. "
+     "Open supported TXT, WRI, CRD, GIM, and image files. "
+     "Drag an item onto a folder to move it, onto the Desktop to show it there, or onto "
+     "the Recycle Bin to delete it. Right-click for Open, Rename, Delete, Cut, Copy, "
+     "and Paste Here. Edit > Cut/Copy/Paste and F2 rename also work."},
     {"GeoFind", "Searches file names, extensions, and folder names. A matching folder "
-     "shows its files. Select a result to open supported TXT, WRI, GIM, or CRD documents."},
+     "shows its files. Select a result to open TXT, WRI, GIM, CRD, PNG, JPG, JPEG, or WEBP files."},
     {"Recent Documents", "Lists the last ten supported documents opened from File Manager, "
      "GeoFind, Run, or this list. Recycled, renamed, and missing entries are ignored."},
     {"Run", "Enter an application name such as Notepad or Paint, or an exact document "
-     "file name. Run opens supported TXT, WRI, GIM, and CRD files."},
+     "file name. Run opens supported text, Paint, Cardfile, and image files."},
     {"Disk Space & Backup", "Shows the whole IDE disk divided into boot/system, GeoFS "
      "metadata, files, reserved space, and free GeoFS space. Backups in Backups\\Latest "
      "are on this same disk and cannot protect against disk loss."},
@@ -303,6 +313,9 @@ static const HelpTopic help_topics[] = {
      "calculation. The calculator works offline."},
     {"Clock", "Displays the system time and date. The time can be adjusted in Control Panel."},
     {"Paint", "Choose a tool and color, then draw with the mouse. Save pictures as GIM files."},
+    {"Image Viewer", "Open PNG, JPG, JPEG, and WEBP pictures from File Manager or the File menu. "
+     "Images are fitted to the window; files are limited to 2.1 megapixels. Use a VM with "
+     "at least 32 MB of memory."},
     {"Terminal", "Use the built-in command prompt for the commands listed by its Help command. "
      "It does not provide network access."},
     {"Control Panel", "Adjust display, sound, date, and other system settings. Sound defaults "
@@ -316,15 +329,16 @@ static const HelpTopic help_topics[] = {
     {"Cardfile", "Create small cards, browse them, and save them as CRD files."},
     {"System Information", "Shows detected hardware and includes recovery actions for system "
      "settings. Resetting settings does not erase documents."},
-    {"Recycle Bin", "Restore an item to its original folder, or empty the bin to delete its "
-     "contents permanently."},
+    {"Recycle Bin", "Right-click an item to restore it, rename it, or delete it permanently. "
+     "You can also restore selected items to their original folders or empty the bin."},
     {"Minesweeper", "Reveal safe squares and flag suspected mines. A number shows how many "
      "mines touch that square."},
     {"Solitaire", "Move cards with the mouse. Use the game controls to draw from the stock "
      "and build foundation piles."},
     {"Snake", "Use the arrow keys to steer. Avoid the walls and your own tail."},
     {"Keyboard shortcuts", "File Manager: Enter opens, Backspace goes up, F2 renames, and "
-     "Ctrl+X/C/V cuts, copies, and pastes. Most windows support Enter and Escape."},
+     "Ctrl+X/C/V cuts, copies, and pastes. Right-click items for common actions. "
+     "Most windows support Enter and Escape."},
     {"Common fixes", "If a document will not open, check its extension and available disk "
      "space. Restore deleted files from Recycle Bin. Backups are stored on this same disk."}
 };

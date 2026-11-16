@@ -227,5 +227,15 @@ void icons_draw(int id, int x, int y) {
         gfx_text(x + 13, y + 9, ">", COL_RED, COL_WHITE);
         return;
     }
+    if (id == ICON_IMAGE) {
+        gfx_fill(x + 4, y + 4, 24, 22, COL_WHITE);
+        gfx_rect(x + 4, y + 4, 24, 22, COL_BLACK);
+        gfx_fill_circle(x + 22, y + 10, 3, COL_YELLOW);
+        gfx_fill_triangle(x + 6, y + 24, x + 13, y + 14, x + 20, y + 24,
+                          COL_GREEN);
+        gfx_fill_triangle(x + 14, y + 24, x + 21, y + 16, x + 27, y + 24,
+                          COL_LTBLUE);
+        return;
+    }
     frame(x, y);
 }

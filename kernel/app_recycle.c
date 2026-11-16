@@ -51,6 +51,11 @@ static void recycle_event(Window *w, Event *e) {
     int rows = (ch - 78) / 20;
     if (rows < 1) rows = 1;
 
+    if (e->type == EVT_TIMER) {
+        reload_bin();
+        return;
+    }
+
     if (e->type == EVT_PAINT) {
         gfx_fill(cx, cy, cw, ch, COL_WHITE);
         gfx_fill(cx, cy, cw, 20, COL_GRAY);
@@ -85,6 +90,26 @@ static void recycle_event(Window *w, Event *e) {
         else if (e->menu_id == 3) gui_close(w);
         return;
     }
+    if (e->type == EVT_RDOWN) {
+        if (e->y >= 22 && e->y < ch - 56) {
+            int idx = scroll + (e->y - 22) / 20;
+            if (idx >= 0 && idx < count) {
+                selected = idx;
+                app_files_context_open(entries[idx], mouse_x, mouse_y);
+            }
+        }
+        return;
+    }
+    if (e->type == EVT_DROP) {
+        int result = app_files_move_inode(e->code, fs_recycle_bin());
+        if (result)
+            gui_dialog("Recycle Bin", "Could not move that item to the Recycle Bin.",
+                       "OK", 0, 0);
+        else
+            reload_bin();
+        gui_invalidate();
+        return;
+    }
     if (e->type == EVT_DOWN) {
         if (e->y >= ch - 30 && e->y < ch - 6) {
             if (e->x >= 8 && e->x < 112) restore_selected();
@@ -117,6 +142,7 @@ void app_recycle_open(void) {
     if (wh > gfx_height() - 16) wh = gfx_height() - 16;
     win = gui_create("Recycle Bin", ww, wh, ICON_RECYCLE, recycle_event, &win);
     if (!win) return;
+    gui_set_timer(win, 100u);
     window_add_menu(win, "File");
     window_add_item(win, 0, "Restore", 1);
     window_add_item(win, 0, "Empty Recycle Bin", 2);

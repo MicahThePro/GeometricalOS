@@ -71,6 +71,8 @@ int gfx_slider_value(int x, int track_x, int track_w, int lo, int hi);
 void gfx_logo(int cx, int cy, int scale);
 void gfx_blit_indexed(int dx, int dy, const uint8_t *src, int bw, int bh,
                       const uint32_t *pal);
+void gfx_blit_rgba_scaled(int dx, int dy, const uint8_t *src, int sw, int sh,
+                          int dw, int dh);
 void gfx_present(void);
 
 /* Cursor is drawn on the front buffer after present. */

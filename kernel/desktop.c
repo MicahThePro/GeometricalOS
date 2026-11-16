@@ -21,6 +21,23 @@ static int desktop_selected;
 static int desktop_drag = -1;
 static int desktop_dx, desktop_dy;
 static int desktop_x, desktop_y;
+static int desktop_items[160];
+static int desktop_item_count;
+static int desktop_file_drag = -1;
+static int desktop_file_selected = -1;
+static int desktop_file_start_x, desktop_file_start_y;
+static int desktop_file_drag_started;
+
+#define DESKTOP_FILES_X 112
+#define DESKTOP_FILES_Y 24
+#define DESKTOP_FILE_CELL_W 96
+#define DESKTOP_FILE_CELL_H 80
+
+static void refresh_desktop_files(void);
+static int desktop_file_position(int index, int *x, int *y);
+static int desktop_file_at(int x, int y);
+static int recycle_icon_hit(int x, int y);
+static void draw_desktop_file(int x, int y, int id, int selected);
 
 static int clamp_desktop_x(int x) {
     int tw = gfx_text_width("Recycle Bin");
@@ -42,6 +59,32 @@ static int clamp_desktop_y(int y) {
     return y;
 }
 
+int desktop_files_dir(void) {
+    int dir = fs_lookup(FS_ROOT, "Desktop");
+    if (dir < 0) dir = fs_create_dir(FS_ROOT, "Desktop");
+    if (dir < 0 || !fs_is_dir(dir)) {
+        serial_write("DESKTOP: could not initialize Desktop folder\n");
+        return -1;
+    }
+    return dir;
+}
+
+static void refresh_desktop_files(void) {
+    int dir = desktop_files_dir();
+    desktop_item_count = dir < 0 ? 0 : fs_list((uint16_t)dir, desktop_items, 160);
+}
+
+static int recycle_icon_hit(int x, int y) {
+    int bx = clamp_desktop_x(desktop_x);
+    int by = clamp_desktop_y(desktop_y);
+    int tx = bx + 16 - gfx_text_width("Recycle Bin") / 2;
+    int left = tx < bx - 8 ? tx : bx - 8;
+    int right = tx + gfx_text_width("Recycle Bin");
+    if (right < bx + 40) right = bx + 40;
+    return x >= left && x < right &&
+           y >= by - 2 && y < by + 36 + gfx_font_h();
+}
+
 typedef struct {
     const char *name;
     int icon;
@@ -58,6 +101,7 @@ static const Prog acc_items[] = {
     {"Calculator", ICON_CALC, app_calc_open},
     {"Clock", ICON_CLOCK, app_clock_open},
     {"Paint", ICON_PAINT, app_paint_open},
+    {"Image Viewer", ICON_IMAGE, app_image_open},
     {"Terminal", ICON_TERM, app_term_open},
     {"Control Panel", ICON_CONTROL, app_control_open},
     {"Media Player", ICON_MEDIA, app_player_open},
@@ -79,7 +123,7 @@ static const Prog game_items[] = {
 
 static const Prog *group_items(int g, int *n) {
     if (g == 0) { *n = 2; return main_items; }
-    if (g == 1) { *n = 17; return acc_items; }
+    if (g == 1) { *n = 18; return acc_items; }
     *n = 3;
     return game_items;
 }
@@ -140,6 +184,13 @@ static void open_desktop_menu(int x, int y) {
 static void desktop_draw(void) {
     int x = clamp_desktop_x(desktop_x);
     int y = clamp_desktop_y(desktop_y);
+    refresh_desktop_files();
+    for (int i = 0; i < desktop_item_count; i++) {
+        int file_x, file_y;
+        if (!desktop_file_position(i, &file_x, &file_y)) break;
+        draw_desktop_file(file_x, file_y, desktop_items[i],
+                          desktop_items[i] == desktop_file_selected);
+    }
     if (desktop_selected && gui_desktop_focused())
         gfx_rect(x - 3, y - 3, 38, 40, COL_WHITE);
     icons_draw(ICON_RECYCLE, x, y);
@@ -153,35 +204,99 @@ static void desktop_draw(void) {
 
 static void desktop_event(Event *e) {
     if (e->type == EVT_RDOWN) {
-        open_desktop_menu(e->x, e->y);
+        int id = desktop_file_at(e->x, e->y);
+        if (id > 0) app_files_context_open(id, e->x, e->y);
+        else open_desktop_menu(e->x, e->y);
     } else if (e->type == EVT_DOWN) {
         int x = clamp_desktop_x(desktop_x);
         int y = clamp_desktop_y(desktop_y);
-        int tx = x + 16 - gfx_text_width("Recycle Bin") / 2;
-        int left = tx < x - 8 ? tx : x - 8;
-        int right = tx + gfx_text_width("Recycle Bin");
-        if (right < x + 40) right = x + 40;
-        if (e->x >= left && e->x < right &&
-            e->y >= y - 2 && e->y < y + 36 + gfx_font_h()) {
+        int id = desktop_file_at(e->x, e->y);
+        if (recycle_icon_hit(e->x, e->y)) {
             desktop_selected = 1;
             desktop_drag = 1;
+            desktop_file_drag = -1;
             desktop_dx = e->x - x;
             desktop_dy = e->y - y;
             if (e->dbl) app_recycle_open();
             gui_invalidate();
             return;
         }
+        if (id > 0) {
+            desktop_selected = 0;
+            desktop_file_selected = id;
+            desktop_drag = -1;
+            desktop_file_drag = id;
+            desktop_file_start_x = e->x;
+            desktop_file_start_y = e->y;
+            desktop_file_drag_started = 0;
+            if (e->dbl) {
+                if (fs_is_dir(id)) app_files_open_directory(id);
+                else if (!app_files_open_inode(id))
+                    gui_dialog("Desktop",
+                               "No application can open this file type.",
+                               "OK", 0, 0);
+            }
+            gui_invalidate();
+            return;
+        }
         desktop_drag = -1;
+        desktop_file_drag = -1;
+        desktop_selected = 0;
         gui_invalidate();
     } else if (e->type == EVT_MOVE && desktop_drag >= 0) {
         int x = e->x - desktop_dx, y = e->y - desktop_dy;
         desktop_x = clamp_desktop_x(x);
         desktop_y = clamp_desktop_y(y);
         gui_invalidate();
+    } else if (e->type == EVT_MOVE && desktop_file_drag > 0 &&
+               !desktop_file_drag_started) {
+        int dx = e->x - desktop_file_start_x;
+        int dy = e->y - desktop_file_start_y;
+        if (dx < 0) dx = -dx;
+        if (dy < 0) dy = -dy;
+        if (dx >= 5 || dy >= 5) {
+            desktop_file_drag_started = 1;
+            gui_set_drag_payload(desktop_file_drag);
+        }
     } else if (e->type == EVT_UP) {
         if (desktop_drag >= 0)
             settings_set_icon_position(4, desktop_x, desktop_y);
         desktop_drag = -1;
+        desktop_file_drag = -1;
+        desktop_file_drag_started = 0;
+    } else if (e->type == EVT_DROP) {
+        int inode = e->code;
+        int destination;
+        int dropping_on_background = 0;
+        if (recycle_icon_hit(e->x, e->y)) {
+            destination = fs_recycle_bin();
+        } else {
+            int target = desktop_file_at(e->x, e->y);
+            if (target > 0 && fs_is_dir(target) && target != inode) {
+                destination = target;
+            } else {
+                destination = desktop_files_dir();
+                dropping_on_background = 1;
+            }
+        }
+        if (dropping_on_background && destination >= 0 &&
+            fs_parent(inode) != (uint16_t)destination) {
+            int items[160];
+            if (fs_list((uint16_t)destination, items, 160) >=
+                desktop_file_capacity()) {
+                gui_dialog("Desktop",
+                           "The Desktop is full. Move or delete an item first.",
+                           "OK", 0, 0);
+                return;
+            }
+        }
+        int result = destination < 0 ? -1 :
+                     app_files_move_inode(inode, destination);
+        if (result)
+            gui_dialog("Desktop", "Could not move that item here.",
+                       "OK", 0, 0);
+        else
+            gui_invalidate();
     } else if (e->type == EVT_KEY) {
         if (e->code == 9 || e->code == KEY_RIGHT || e->code == KEY_DOWN ||
             e->code == KEY_LEFT || e->code == KEY_UP)
@@ -249,6 +364,100 @@ static void draw_labeled_icon(int x, int y, int icon, const char *label, int sel
     }
 }
 
+static int desktop_file_position(int index, int *x, int *y) {
+    int width = gfx_width();
+    int work_h = gfx_height() - GUI_TASKBAR_HEIGHT;
+    int columns = (width - DESKTOP_FILES_X - 80) / DESKTOP_FILE_CELL_W + 1;
+    int rows = (work_h - DESKTOP_FILES_Y - 36 - 2 * gfx_font_h()) /
+               DESKTOP_FILE_CELL_H + 1;
+    if (columns < 1) columns = 1;
+    if (rows < 1) rows = 1;
+    int bx = clamp_desktop_x(desktop_x);
+    int by = clamp_desktop_y(desktop_y);
+    int bin_tx = bx + 16 - gfx_text_width("Recycle Bin") / 2;
+    int bin_left = bin_tx < bx - 8 ? bin_tx : bx - 8;
+    int bin_right = bin_tx + gfx_text_width("Recycle Bin");
+    if (bin_right < bx + 40) bin_right = bx + 40;
+    int visible = 0;
+    for (int cell = 0; cell < columns * rows; cell++) {
+        int cell_x = DESKTOP_FILES_X + (cell % columns) * DESKTOP_FILE_CELL_W;
+        int cell_y = DESKTOP_FILES_Y + (cell / columns) * DESKTOP_FILE_CELL_H;
+        int overlap = cell_x - 8 < bin_right && cell_x + 88 > bin_left &&
+                      cell_y - 4 < by + 36 + gfx_font_h() &&
+                      cell_y + 36 + 2 * gfx_font_h() > by - 2;
+        if (overlap) continue;
+        if (visible++ != index) continue;
+        *x = cell_x;
+        *y = cell_y;
+        return 1;
+    }
+    return 0;
+}
+
+int desktop_file_capacity(void) {
+    int capacity = 0;
+    int x, y;
+    while (desktop_file_position(capacity, &x, &y)) capacity++;
+    return capacity;
+}
+
+static int desktop_file_at(int x, int y) {
+    refresh_desktop_files();
+    for (int i = 0; i < desktop_item_count; i++) {
+        int icon_x, icon_y;
+        if (!desktop_file_position(i, &icon_x, &icon_y)) break;
+        if (x >= icon_x - 8 && x < icon_x + 88 &&
+            y >= icon_y - 4 &&
+            y < icon_y + 36 + 2 * gfx_font_h())
+            return desktop_items[i];
+    }
+    return -1;
+}
+
+static int split_desktop_file_name(const char *name, char *first, char *second) {
+    int length = (int)strlen(name);
+    if (length <= 10) {
+        memcpy(first, name, (size_t)length + 1);
+        second[0] = 0;
+        return 1;
+    }
+    int dot = -1;
+    for (int i = 1; i < length; i++)
+        if (name[i] == '.') dot = i;
+    if (dot > 0 && dot <= 10 && length - dot <= 10) {
+        memcpy(first, name, (size_t)dot);
+        first[dot] = 0;
+        memcpy(second, name + dot, (size_t)(length - dot));
+        second[length - dot] = 0;
+        return 2;
+    }
+    memcpy(first, name, 10);
+    first[10] = 0;
+    int remainder = length - 10;
+    if (remainder > 10) remainder = 10;
+    memcpy(second, name + 10, (size_t)remainder);
+    if (length > 20) second[9] = '~';
+    second[remainder] = 0;
+    return 2;
+}
+
+static void draw_desktop_file(int x, int y, int id, int selected) {
+    char first[12], second[12];
+    int lines = split_desktop_file_name(fs_name(id), first, second);
+    icons_draw(fs_is_dir(id) ? ICON_FILES : ICON_NOTE, x, y);
+    for (int line = 0; line < lines; line++) {
+        const char *text = line ? second : first;
+        int tw = gfx_text_width(text);
+        int tx = x + 16 - tw / 2;
+        if (tx < 4) tx = 4;
+        if (tx + tw > gfx_width() - 4) tx = gfx_width() - 4 - tw;
+        int ty = y + 36 + line * gfx_font_h();
+        if (selected) gfx_fill(tx - 2, ty, tw + 4, gfx_font_h(), COL_NAVY);
+        gfx_text(tx, ty, text, selected ? COL_WHITE : COL_BLACK,
+                 selected ? COL_NAVY : COL_GRAY);
+    }
+}
+
 static void open_group(int g);
 
 static void pm_event(Window *w, Event *e) {
@@ -285,7 +494,7 @@ static void pm_event(Window *w, Event *e) {
                        "Write, Character Map, Cardfile,\n"
                        "GeoFind, Run, Help, Backups, FTP,\n"
                        "Snake, Solitaire, Calculator,\n"
-                       "Clock, Paint, and files.",
+                       "Clock, Paint, Image Viewer, and files.",
                        "OK", 0, 0);
         } else if (e->menu_id == 8) app_help_open();
         return;
@@ -417,6 +626,7 @@ void splash_screen(void) {
 
 void desktop_init(void) {
     wall_load();
+    desktop_files_dir();
     gui_set_launcher(launch_key);
     gui_set_start_handler(open_geodeck);
     gui_set_desktop_handler(desktop_draw, desktop_event);

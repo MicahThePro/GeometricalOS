@@ -25,6 +25,7 @@ void gui_pump(void);
 static int drag; /* 1 = move window, 2 = client capture */
 static Window *drag_win;
 static int drag_dx, drag_dy;
+static int drag_payload = -1;
 
 static int menu_on;
 static Window *menu_win;
@@ -52,6 +53,7 @@ void gui_set_desktop_handler(void (*draw)(void), void (*event)(Event *)) {
     desktop_draw_fn = draw;
     desktop_event_fn = event;
 }
+void gui_set_drag_payload(int payload) { drag_payload = payload; }
 void gui_focus_desktop(void) {
     focused = 0;
     desktop_has_focus = 1;
@@ -976,9 +978,23 @@ static void client_event(Window *w, int type, int dbl) {
     gui_invalidate();
 }
 
+static void drop_event(Window *w, int payload) {
+    int cx, cy, cw, ch;
+    window_client(w, &cx, &cy, &cw, &ch);
+    Event e;
+    memset(&e, 0, sizeof(e));
+    e.type = EVT_DROP;
+    e.x = mouse_x - cx;
+    e.y = mouse_y - cy;
+    e.code = payload;
+    send(w, &e);
+    gui_invalidate();
+}
+
 static int delivering_click;
 
 static void on_left_down(void) {
+    drag_payload = -1;
     int dbl = 0;
     uint32_t t = timer_ticks();
     if (t - click_tick < (uint32_t)settings_dbl_ticks() && iabs(mouse_x - click_x) < 6 && iabs(mouse_y - click_y) < 6) dbl = 1;
@@ -1182,6 +1198,23 @@ static void on_left_up(void) {
         e.y = mouse_y;
         desktop_event_fn(&e);
     }
+    if (drag_payload > 0) {
+        Window *target = top_at(mouse_x, mouse_y);
+        if (target) {
+            int hit = hit_window(target, mouse_x, mouse_y, 0);
+            if (hit == HIT_CLIENT) drop_event(target, drag_payload);
+        } else if (desktop_event_fn &&
+                   mouse_y < gfx_height() - GUI_TASKBAR_HEIGHT) {
+            Event e;
+            memset(&e, 0, sizeof(e));
+            e.type = EVT_DROP;
+            e.x = mouse_x;
+            e.y = mouse_y;
+            e.code = drag_payload;
+            desktop_event_fn(&e);
+        }
+    }
+    drag_payload = -1;
     drag = 0;
     drag_win = 0;
 }
