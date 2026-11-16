@@ -20,18 +20,12 @@ static int sel_group[3];
 static int desktop_selected;
 static int desktop_drag = -1;
 static int desktop_dx, desktop_dy;
-static int desktop_x[5], desktop_y[5];
-static const char *desktop_names[5] = {
-    "File Manager", "Write", "Control Panel", "Snake", "Recycle Bin"
-};
-static const int desktop_icons[5] = {
-    ICON_FILES, ICON_WRITE, ICON_GROUP, ICON_SNAKE, ICON_RECYCLE
-};
+static int desktop_x, desktop_y;
 
-static int clamp_desktop_x(int i, int x) {
-    int tw = gfx_text_width(desktop_names[i]);
-    int min_x = (tw + 1) / 2 - 16;
-    int max_x = gfx_width() - 16 - tw / 2;
+static int clamp_desktop_x(int x) {
+    int tw = gfx_text_width("Recycle Bin");
+    int min_x = (tw + 1) / 2 - 8;
+    int max_x = gfx_width() - 24 - tw / 2;
     if (min_x < 0) min_x = 0;
     if (max_x > gfx_width() - 32) max_x = gfx_width() - 32;
     if (max_x < min_x) max_x = min_x;
@@ -41,7 +35,7 @@ static int clamp_desktop_x(int i, int x) {
 }
 
 static int clamp_desktop_y(int y) {
-    int max_y = gfx_height() - 58;
+    int max_y = gfx_height() - GUI_TASKBAR_HEIGHT - 54;
     if (max_y < 0) max_y = 0;
     if (y < 0) return 0;
     if (y > max_y) return max_y;
@@ -65,11 +59,16 @@ static const Prog acc_items[] = {
     {"Clock", ICON_CLOCK, app_clock_open},
     {"Paint", ICON_PAINT, app_paint_open},
     {"Terminal", ICON_TERM, app_term_open},
-    {"Control Panel", ICON_GROUP, app_control_open},
-    {"Media Player", ICON_NOTE, app_player_open},
+    {"Control Panel", ICON_CONTROL, app_control_open},
+    {"Media Player", ICON_MEDIA, app_player_open},
     {"Character Map", ICON_CHARMAP, app_charmap_open},
     {"Cardfile", ICON_CARDFILE, app_cardfile_open},
     {"System Information", ICON_SYSTEM, app_recovery_open},
+    {"GeoFind", ICON_GEOFIND, app_geofind_open},
+    {"Recent Documents", ICON_RECENT, app_recent_open},
+    {"Run...", ICON_RUN, app_run_open},
+    {"Help", ICON_HELP, app_help_open},
+    {"Disk Space & Backup", ICON_STORAGE, app_storage_open},
 };
 static const Prog game_items[] = {
     {"Minesweeper", ICON_MINE, app_mines_open},
@@ -79,7 +78,7 @@ static const Prog game_items[] = {
 
 static const Prog *group_items(int g, int *n) {
     if (g == 0) { *n = 2; return main_items; }
-    if (g == 1) { *n = 11; return acc_items; }
+    if (g == 1) { *n = 16; return acc_items; }
     *n = 3;
     return game_items;
 }
@@ -98,64 +97,33 @@ static void launch_key(int key) {
     else if (key == 12) app_snake_open();
 }
 
-static void open_desktop_icon(int i) {
-    if (i == 0) app_files_open();
-    else if (i == 1) app_write_open();
-    else if (i == 2) app_control_open();
-    else if (i == 3) app_snake_open();
-    else if (i == 4) app_recycle_open();
-}
-
-static void arrange_icons(int by_type) {
-    static const int by_name[5] = {2, 0, 4, 3, 1};
-    static const int by_kind[5] = {2, 0, 4, 1, 3};
-    const int *order = by_type ? by_kind : by_name;
-    int x[5], y[5];
-    int start_y = gfx_height() >= 500 ? 24 : 12;
-    int spacing = gfx_font_h() > 12 ? 76 : 72;
-
-    for (int row = 0; row < 5; row++) {
-        int icon = order[row];
-        x[icon] = clamp_desktop_x(icon, 20);
-        y[icon] = clamp_desktop_y(start_y + row * spacing);
-    }
-    for (int i = 0; i < 5; i++) {
-        desktop_x[i] = x[i];
-        desktop_y[i] = y[i];
-    }
-    settings_set_icon_positions(x, y);
-    gui_invalidate();
-}
-
 static void desktop_menu_event(Window *w, Event *e) {
     static const char *items[] = {
-        "Sort by Name",
-        "Sort by Type",
-        "Solid Teal",
+        "Solid",
         "Tiles",
         "Stripes",
-        "Diamonds"
+        "Diamonds",
+        "Orbit Grid"
     };
+    const int item_count = (int)(sizeof(items) / sizeof(items[0]));
     int cx, cy, cw, ch;
     window_client(w, &cx, &cy, &cw, &ch);
     if (e->type == EVT_PAINT) {
         gfx_fill(cx, cy, cw, ch, COL_GRAY);
-        for (int i = 0; i < 6; i++)
+        for (int i = 0; i < item_count; i++)
             gfx_button(cx + 6, cy + 4 + i * 26, cw - 12, 24, items[i], 0);
         return;
     }
     if (e->type != EVT_DOWN || e->x < 6 || e->x >= cw - 6) return;
     int item = (e->y - 4) / 26;
-    if (item < 0 || item >= 6 || e->y >= 4 + item * 26 + 24) return;
+    if (item < 0 || item >= item_count || e->y >= 4 + item * 26 + 24) return;
     gui_close(w);
-    if (item == 0) arrange_icons(0);
-    else if (item == 1) arrange_icons(1);
-    else wall_set(item - 2);
+    wall_set(item);
 }
 
 static void open_desktop_menu(int x, int y) {
     if (desktop_menu) gui_close(desktop_menu);
-    int w = 224, h = 232;
+    int w = 160, h = 4 + 5 * 26 + 4 + 24;
     if (w > gfx_width()) w = gfx_width();
     if (h > gfx_height()) h = gfx_height();
     desktop_menu = gui_create("Desktop", w, h, ICON_GROUP,
@@ -169,62 +137,55 @@ static void open_desktop_menu(int x, int y) {
 }
 
 static void desktop_draw(void) {
-    for (int i = 0; i < 5; i++) {
-        int x = clamp_desktop_x(i, desktop_x[i]);
-        int y = clamp_desktop_y(desktop_y[i]);
-        if (i == desktop_selected && gui_desktop_focused()) {
-            gfx_rect(x - 3, y - 3, 38, 40, COL_WHITE);
-        }
-        icons_draw(desktop_icons[i], x, y);
-        int tw = gfx_text_width(desktop_names[i]);
-        int tx = x + 16 - tw / 2;
-        if (i == desktop_selected)
-            gfx_fill(tx - 2, y + 36, tw + 4, gfx_font_h(), COL_NAVY);
-        gfx_text(tx, y + 36, desktop_names[i],
-                 COL_WHITE, i == desktop_selected ? COL_NAVY : settings_desktop_color());
-    }
+    int x = clamp_desktop_x(desktop_x);
+    int y = clamp_desktop_y(desktop_y);
+    if (desktop_selected && gui_desktop_focused())
+        gfx_rect(x - 3, y - 3, 38, 40, COL_WHITE);
+    icons_draw(ICON_RECYCLE, x, y);
+    int tw = gfx_text_width("Recycle Bin");
+    int tx = x + 16 - tw / 2;
+    if (desktop_selected)
+        gfx_fill(tx - 2, y + 36, tw + 4, gfx_font_h(), COL_NAVY);
+    gfx_text(tx, y + 36, "Recycle Bin", COL_WHITE,
+             desktop_selected ? COL_NAVY : settings_desktop_color());
 }
 
 static void desktop_event(Event *e) {
     if (e->type == EVT_RDOWN) {
         open_desktop_menu(e->x, e->y);
     } else if (e->type == EVT_DOWN) {
-        for (int i = 0; i < 5; i++) {
-            int x = clamp_desktop_x(i, desktop_x[i]);
-            int y = clamp_desktop_y(desktop_y[i]);
-            int tx = x + 16 - gfx_text_width(desktop_names[i]) / 2;
-            int left = tx < x - 8 ? tx : x - 8;
-            int right = tx + gfx_text_width(desktop_names[i]);
-            if (right < x + 40) right = x + 40;
-            if (e->x >= left && e->x < right &&
-                e->y >= y - 2 && e->y < y + 36 + gfx_font_h()) {
-                desktop_selected = i;
-                desktop_drag = i;
-                desktop_dx = e->x - x;
-                desktop_dy = e->y - y;
-                if (e->dbl) open_desktop_icon(i);
-                gui_invalidate();
-                return;
-            }
+        int x = clamp_desktop_x(desktop_x);
+        int y = clamp_desktop_y(desktop_y);
+        int tx = x + 16 - gfx_text_width("Recycle Bin") / 2;
+        int left = tx < x - 8 ? tx : x - 8;
+        int right = tx + gfx_text_width("Recycle Bin");
+        if (right < x + 40) right = x + 40;
+        if (e->x >= left && e->x < right &&
+            e->y >= y - 2 && e->y < y + 36 + gfx_font_h()) {
+            desktop_selected = 1;
+            desktop_drag = 1;
+            desktop_dx = e->x - x;
+            desktop_dy = e->y - y;
+            if (e->dbl) app_recycle_open();
+            gui_invalidate();
+            return;
         }
         desktop_drag = -1;
         gui_invalidate();
     } else if (e->type == EVT_MOVE && desktop_drag >= 0) {
         int x = e->x - desktop_dx, y = e->y - desktop_dy;
-        desktop_x[desktop_drag] = clamp_desktop_x(desktop_drag, x);
-        desktop_y[desktop_drag] = clamp_desktop_y(y);
+        desktop_x = clamp_desktop_x(x);
+        desktop_y = clamp_desktop_y(y);
         gui_invalidate();
     } else if (e->type == EVT_UP) {
         if (desktop_drag >= 0)
-            settings_set_icon_position(desktop_drag, desktop_x[desktop_drag],
-                                       desktop_y[desktop_drag]);
+            settings_set_icon_position(4, desktop_x, desktop_y);
         desktop_drag = -1;
     } else if (e->type == EVT_KEY) {
-        if (e->code == 9 || e->code == KEY_RIGHT || e->code == KEY_DOWN)
-            desktop_selected = (desktop_selected + 1) % 5;
-        else if (e->code == KEY_LEFT || e->code == KEY_UP)
-            desktop_selected = (desktop_selected + 4) % 5;
-        else if (e->code == 10 || e->code == 13) open_desktop_icon(desktop_selected);
+        if (e->code == 9 || e->code == KEY_RIGHT || e->code == KEY_DOWN ||
+            e->code == KEY_LEFT || e->code == KEY_UP)
+            desktop_selected = 1;
+        else if (e->code == 10 || e->code == 13) app_recycle_open();
         else if (e->code == 27 && pm) gui_focus(pm);
         gui_invalidate();
     }
@@ -292,14 +253,14 @@ static void open_group(int g);
 static void pm_event(Window *w, Event *e) {
     int cx, cy, cw, ch;
     window_client(w, &cx, &cy, &cw, &ch);
-    static const char *names[] = {"Main", "Accessories", "Games"};
+    static const char *names[] = {"Workspace", "Utilities", "Arcade"};
     int xs[3];
     int gap = cw / 4;
     for (int i = 0; i < 3; i++) xs[i] = cx + gap * (i + 1) - 16;
     int iy = cy + 36;
     if (e->type == EVT_PAINT) {
         gfx_fill(cx, cy, cw, ch, COL_GRAY);
-        gfx_text(cx + 12, cy + 8, "Program groups", COL_BLACK, COL_GRAY);
+        gfx_text(cx + 12, cy + 8, "Choose a workspace", COL_BLACK, COL_GRAY);
         for (int i = 0; i < 3; i++)
             draw_labeled_icon(xs[i], iy, ICON_GROUP, names[i], sel_pm == i,
                               cx + 4, cx + cw - 4);
@@ -311,16 +272,21 @@ static void pm_event(Window *w, Event *e) {
     if (e->type == EVT_MENU) {
         if (e->menu_id == 1 || e->menu_id == -1) ask_exit();
         else if (e->menu_id == 3) app_wall_open();
+        else if (e->menu_id == 4) app_run_open();
+        else if (e->menu_id == 5) app_geofind_open();
+        else if (e->menu_id == 6) app_recent_open();
+        else if (e->menu_id == 7) app_storage_open();
         else if (e->menu_id == 2) {
             gui_dialog("About GeometricalOS",
                    "GeometricalOS version " GOS_VERSION "\n\n"
                        "A tiny hobby operating system\n"
                        "inspired by Windows 3.1.\n\n"
                        "Write, Character Map, Cardfile,\n"
+                       "GeoFind, Run, Help, Backups,\n"
                        "Snake, Solitaire, Calculator,\n"
                        "Clock, Paint, and files.",
                        "OK", 0, 0);
-        }
+        } else if (e->menu_id == 8) app_help_open();
         return;
     }
     if (e->type == EVT_DOWN) {
@@ -386,7 +352,7 @@ static void group_event(Window *w, Event *e) {
 
 static void open_group(int g) {
     if (groups[g]) { gui_restore(groups[g]); return; }
-    const char *title = g == 0 ? "Main" : (g == 1 ? "Accessories" : "Games");
+    const char *title = g == 0 ? "Workspace" : (g == 1 ? "Utilities" : "Arcade");
     int n = 0;
     group_items(g, &n);
     int ww = 140 + (n > 4 ? 4 : n) * 100;
@@ -395,11 +361,35 @@ static void open_group(int g) {
     int rows = (n + 3) / 4;
     if (rows < 1) rows = 1;
     int wh = 80 + rows * 96;
-    if (wh > gfx_height() - 16) wh = gfx_height() - 16;
+    if (wh > gfx_height() - GUI_TASKBAR_HEIGHT - 16)
+        wh = gfx_height() - GUI_TASKBAR_HEIGHT - 16;
     groups[g] = gui_create(title, ww, wh, ICON_GROUP, group_event, &groups[g]);
     if (!groups[g]) return;
     groups[g]->user = (void *)(intptr_t)g;
     serial_write(g == 0 ? "GROUP: MAIN\n" : (g == 1 ? "GROUP: ACC\n" : "GROUP: GAMES\n"));
+}
+
+static void open_geodeck(void) {
+    if (pm) { gui_restore(pm); return; }
+    int ww = gfx_width() >= 800 ? 640 : gfx_width() - 48;
+    int wh = gfx_height() >= 600 ? 420 : gfx_height() - GUI_TASKBAR_HEIGHT - 48;
+    if (ww < 280) ww = 280;
+    if (wh < 180) wh = 180;
+    pm = gui_create("GeoDeck", ww, wh, ICON_GROUP, pm_event, &pm);
+    if (!pm) return;
+    gui_move(pm, (gfx_width() - pm->w) / 2,
+             (gfx_height() - GUI_TASKBAR_HEIGHT - pm->h) / 2);
+    window_add_menu(pm, "File");
+    window_add_item(pm, 0, "Exit GeometricalOS...", 1);
+    window_add_item(pm, 0, "Run...", 4);
+    window_add_item(pm, 0, "GeoFind...", 5);
+    window_add_item(pm, 0, "Recent Documents", 6);
+    window_add_item(pm, 0, "Disk Space & Backup", 7);
+    window_add_menu(pm, "Options");
+    window_add_item(pm, 1, "Wallpaper...", 3);
+    window_add_menu(pm, "Help");
+    window_add_item(pm, 2, "Help Topics", 8);
+    window_add_item(pm, 2, "About GeometricalOS", 2);
 }
 
 void splash_screen(void) {
@@ -427,22 +417,8 @@ void splash_screen(void) {
 void desktop_init(void) {
     wall_load();
     gui_set_launcher(launch_key);
+    gui_set_start_handler(open_geodeck);
     gui_set_desktop_handler(desktop_draw, desktop_event);
-    for (int i = 0; i < 5; i++) {
-        desktop_x[i] = clamp_desktop_x(i, settings_icon_x(i));
-        desktop_y[i] = clamp_desktop_y(settings_icon_y(i));
-    }
-    int ww = gfx_width() >= 800 ? 640 : gfx_width() - 132;
-    int wh = gfx_height() >= 600 ? 420 : gfx_height() - 70;
-    pm = gui_create("Program Manager", ww, wh, ICON_GROUP, pm_event, &pm);
-    if (!pm) return;
-    pm->keep = 1;
-    gui_move(pm, gfx_width() - ww - 16, 16);
-    window_add_menu(pm, "File");
-    window_add_item(pm, 0, "Exit GeometricalOS...", 1);
-    window_add_menu(pm, "Options");
-    window_add_item(pm, 1, "Wallpaper...", 3);
-    window_add_menu(pm, "Help");
-    window_add_item(pm, 2, "About GeometricalOS", 2);
-    gui_focus(pm);
+    desktop_x = clamp_desktop_x(settings_icon_x(4));
+    desktop_y = clamp_desktop_y(settings_icon_y(4));
 }

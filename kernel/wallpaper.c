@@ -12,7 +12,7 @@ void wall_load(void) {
 
 void wall_set(int id) {
     if (id < 0) id = 0;
-    if (id > 3) id = 3;
+    if (id > 4) id = 4;
     wall_id = id;
     settings_set_wallpaper(id);
 }
@@ -37,14 +37,27 @@ void wall_draw(void) {
                 gfx_fill_triangle(x, y + 10, x + 10, y, x + 20, y + 10, 0x20A0A0);
                 gfx_fill_triangle(x, y + 10, x + 10, y + 20, x + 20, y + 10, 0x006060);
             }
+    } else if (wall_id == 4) {
+        for (int y = 0; y < h; y += 64) {
+            for (int x = 0; x < w; x += 64) {
+                gfx_line(x + 32, y + 4, x + 60, y + 32, COL_GEO_MID);
+                gfx_line(x + 60, y + 32, x + 32, y + 60, COL_GEO_MID);
+                gfx_line(x + 32, y + 60, x + 4, y + 32, COL_GEO_MID);
+                gfx_line(x + 4, y + 32, x + 32, y + 4, COL_GEO_MID);
+                if (((x / 64) + (y / 64)) % 3 == 0)
+                    gfx_fill_triangle(x + 28, y + 32, x + 32, y + 24,
+                                      x + 36, y + 32, 0x98722Fu);
+            }
+        }
     }
 }
 
 static const char *NAMES[] = {
-    "Solid teal",
+    "Solid",
     "Tiles",
     "Stripes",
-    "Diamonds"
+    "Diamonds",
+    "Orbit Grid"
 };
 
 static void wall_event(Window *w, Event *e) {
@@ -53,16 +66,16 @@ static void wall_event(Window *w, Event *e) {
     if (e->type == EVT_PAINT) {
         gfx_fill(cx, cy, cw, ch, COL_GRAY);
         gfx_text(cx + 12, cy + 8, "Choose a desktop pattern", COL_BLACK, COL_GRAY);
-        for (int i = 0; i < 4; i++) {
-            int y = cy + 36 + i * 36;
-            gfx_button(cx + 16, y, cw - 32, 30, NAMES[i], wall_id == i);
+        for (int i = 0; i < 5; i++) {
+            int y = cy + 36 + i * 32;
+            gfx_button(cx + 16, y, cw - 32, 26, NAMES[i], wall_id == i);
         }
         return;
     }
     if (e->type == EVT_DOWN) {
-        for (int i = 0; i < 4; i++) {
-            int y = 36 + i * 36;
-            if (e->x >= 16 && e->x < cw - 16 && e->y >= y && e->y < y + 30) {
+        for (int i = 0; i < 5; i++) {
+            int y = 36 + i * 32;
+            if (e->x >= 16 && e->x < cw - 16 && e->y >= y && e->y < y + 26) {
                 wall_set(i);
                 gui_invalidate();
                 return;
@@ -74,5 +87,5 @@ static void wall_event(Window *w, Event *e) {
 void app_wall_open(void) {
     static Window *win;
     if (win) { gui_restore(win); return; }
-    win = gui_create("Wallpaper", 280, 230, ICON_GROUP, wall_event, &win);
+    win = gui_create("Wallpaper", 280, 230, ICON_WALLPAPER, wall_event, &win);
 }

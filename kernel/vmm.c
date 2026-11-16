@@ -69,6 +69,7 @@ static volatile uint32_t *mmio;
 static int present;
 static int mouse_ready;
 static int absolute;
+static uint32_t mouse_poll_tick;
 static uint32_t display_poll_tick;
 
 static void vmm_submit(void *packet) {
@@ -140,6 +141,9 @@ int vmm_mouse_absolute(void) { return absolute; }
 
 int vmm_mouse_poll(int *x, int *y, int sw, int sh) {
     if (!mouse_ready) return 0;
+    uint32_t now = timer_ticks();
+    if (now == mouse_poll_tick) return 0;
+    mouse_poll_tick = now;
     if (!vmm_call_mouse(VMM_REQ_GET_MOUSE, 0)) return 0;
     if (req.features & VMM_MOUSE_HOST_ABS) absolute = 1;
     else {

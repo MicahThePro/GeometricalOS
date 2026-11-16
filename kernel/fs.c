@@ -38,6 +38,7 @@ _Static_assert(sizeof(Super) <= 512, "GeoFS superblock must fit in one sector");
 static Super *super = (Super *)0x640000;
 static Inode *inodes = (Inode *)0x641000;
 static uint8_t *bitmap = (uint8_t *)0x650000;
+static uint8_t copy_buffer[MAX_FILE_BYTES];
 static int mounted;
 
 static int bit_get(uint32_t i) {
@@ -93,7 +94,9 @@ int fs_format(uint32_t disk_sectors) {
 int fs_mount(void) {
     if (ata_read(FS_LBA, super, 1)) return -1;
     if (memcmp(super->magic, "GEOFS001", 8) != 0) return -2;
-    if (super->inode_count != INODE_COUNT || super->data_blocks == 0) return -3;
+    if (super->inode_count != INODE_COUNT || super->data_blocks == 0 ||
+        super->data_blocks > BITMAP_SECTORS * 512u * 8u)
+        return -3;
     if (ata_read(BITMAP_LBA, bitmap, BITMAP_SECTORS)) return -1;
     if (ata_read(INODE_LBA, inodes, INODE_SECTORS)) return -1;
     if (inodes[0].type != 2) return -4;
@@ -184,17 +187,22 @@ int fs_write(uint16_t parent, const char *name, const void *data, uint32_t size)
     if (blocks) {
         if (alloc_run(blocks, &lba)) return -5;
         const uint8_t *src = data;
-        for (uint32_t s = 0; s < blocks; s++) {
+        uint32_t full_blocks = size / 512u;
+        uint16_t batch[16 * 256];
+        for (uint32_t s = 0; s < full_blocks;) {
+            uint32_t count = full_blocks - s;
+            if (count > 16) count = 16;
+            memcpy(batch, src + s * 512u, count * 512u);
+            if (ata_write(lba + s, batch, count)) return -6;
+            s += count;
+        }
+        if (size & 511u) {
             uint8_t sec[512];
-            memset(sec, 0, 512);
-            uint32_t off = s * 512u;
-            uint32_t chunk = 0;
-            if (off < size) {
-                chunk = size - off;
-                if (chunk > 512) chunk = 512;
-                memcpy(sec, src + off, chunk);
-            }
-            if (ata_write(lba + s, sec, 1)) return -6;
+            uint32_t off = full_blocks * 512u;
+            uint32_t chunk = size - off;
+            memset(sec, 0, sizeof(sec));
+            memcpy(sec, src + off, chunk);
+            if (ata_write(lba + full_blocks, sec, 1)) return -6;
         }
     }
     ino->start_lba = lba;
@@ -227,15 +235,19 @@ int fs_read(int inode, void *buf, uint32_t max, uint32_t *out_size) {
     return 0;
 }
 
-int fs_delete(int inode) {
-    if (!mounted || inode <= 0 || inode >= INODE_COUNT) return -1;
-    if (inodes[inode].type == 2) {
-        int kids[4];
-        if (fs_list((uint16_t)inode, kids, 1) > 0) return -2;
-    }
+static void delete_inode_memory(int inode) {
     if (inodes[inode].type == 1 && inodes[inode].blocks)
         free_run(inodes[inode].start_lba, inodes[inode].blocks);
     memset(&inodes[inode], 0, sizeof(Inode));
+}
+
+int fs_delete(int inode) {
+    if (!mounted || inode <= 0 || inode >= INODE_COUNT) return -1;
+    if (inodes[inode].type == 2) {
+        int kids[1];
+        if (fs_list((uint16_t)inode, kids, 1) > 0) return -2;
+    }
+    delete_inode_memory(inode);
     return fs_sync();
 }
 
@@ -276,6 +288,201 @@ static int inside_directory(int inode, uint16_t dir) {
         if (parent >= INODE_COUNT || inodes[parent].type != 2) return 0;
         parent = inodes[parent].parent;
     }
+    return 0;
+}
+
+int fs_delete_tree(int inode) {
+    if (!mounted || inode <= 0 || inode >= INODE_COUNT || !inodes[inode].type)
+        return -1;
+    int bin = fs_lookup(FS_ROOT, "Recycle Bin");
+    if (inode == bin) return -1;
+
+    for (int pass = 0; pass < INODE_COUNT; pass++) {
+        int progress = 0;
+        for (int i = 1; i < INODE_COUNT; i++) {
+            if (!inodes[i].type || !inside_directory(i, (uint16_t)inode)) continue;
+            if (inodes[i].type == 2) {
+                int child[1];
+                if (fs_list((uint16_t)i, child, 1) > 0) continue;
+            }
+            delete_inode_memory(i);
+            progress = 1;
+        }
+        int child[1];
+        if (fs_list((uint16_t)inode, child, 1) == 0) {
+            delete_inode_memory(inode);
+            return fs_sync();
+        }
+        if (!progress) {
+            fs_sync();
+            return -1;
+        }
+    }
+    fs_sync();
+    return -1;
+}
+
+int fs_rename(int inode, const char *name) {
+    if (!mounted || inode <= 0 || inode >= INODE_COUNT ||
+        !inodes[inode].type || !valid_name(name))
+        return -1;
+    if (inode == fs_lookup(FS_ROOT, "Recycle Bin")) return -1;
+    int existing = fs_lookup(inodes[inode].parent, name);
+    if (existing >= 0 && existing != inode) return -2;
+    char old_name[28];
+    memcpy(old_name, inodes[inode].name, sizeof(old_name));
+    memset(inodes[inode].name, 0, sizeof(inodes[inode].name));
+    strncpy(inodes[inode].name, name, sizeof(inodes[inode].name));
+    if (fs_sync()) {
+        memcpy(inodes[inode].name, old_name, sizeof(old_name));
+        fs_sync();
+        return -3;
+    }
+    return 0;
+}
+
+int fs_move(int inode, uint16_t parent) {
+    if (!mounted || inode <= 0 || inode >= INODE_COUNT ||
+        !inodes[inode].type || parent >= INODE_COUNT ||
+        inodes[parent].type != 2)
+        return -1;
+    int bin = fs_lookup(FS_ROOT, "Recycle Bin");
+    if (inode == bin || (bin >= 0 &&
+        (parent == (uint16_t)bin || inodes[inode].parent == (uint16_t)bin)))
+        return -1;
+    if (inodes[inode].parent == parent) return 0;
+    if (inode == parent) return -2;
+    if (inside_directory(parent, (uint16_t)inode)) return -2;
+    if (fs_lookup(parent, inodes[inode].name) >= 0) return -3;
+    uint16_t old_parent = inodes[inode].parent;
+    inodes[inode].parent = parent;
+    if (fs_sync()) {
+        inodes[inode].parent = old_parent;
+        fs_sync();
+        return -4;
+    }
+    return 0;
+}
+
+static int copy_file_as(int source, uint16_t parent, const char *name) {
+    uint32_t size = fs_size(source), read_size = 0;
+    if (fs_read(source, copy_buffer, MAX_FILE_BYTES, &read_size) ||
+        read_size != size)
+        return -1;
+    int copied = fs_write(parent, name, copy_buffer, size);
+    if (copied < 0) {
+        int partial = fs_lookup(parent, name);
+        if (partial >= 0 && !fs_is_dir(partial)) fs_delete(partial);
+        return -1;
+    }
+    return copied;
+}
+
+static int copy_file(int source, uint16_t parent) {
+    return copy_file_as(source, parent, fs_name(source));
+}
+
+int fs_copy_as(int inode, uint16_t parent, const char *name) {
+    if (!mounted || inode <= 0 || inode >= INODE_COUNT ||
+        !inodes[inode].type || parent >= INODE_COUNT ||
+        inodes[parent].type != 2 || !valid_name(name))
+        return -1;
+    if (fs_lookup(parent, name) >= 0) return -2;
+    if (inodes[inode].type == 1)
+        return copy_file_as(inode, parent, name) < 0 ? -3 : 0;
+    if (inode == parent || inside_directory(parent, (uint16_t)inode)) return -4;
+
+    int copy_root = fs_create_dir(parent, name);
+    if (copy_root < 0) return -5;
+    uint16_t source_dirs[INODE_COUNT], target_dirs[INODE_COUNT];
+    int read = 0, write = 1;
+    source_dirs[0] = (uint16_t)inode;
+    target_dirs[0] = (uint16_t)copy_root;
+
+    while (read < write) {
+        int source = source_dirs[read];
+        uint16_t target = target_dirs[read++];
+        int children[INODE_COUNT];
+        int count = fs_list((uint16_t)source, children, INODE_COUNT);
+        for (int i = 0; i < count; i++) {
+            int child = children[i];
+            if (fs_is_dir(child)) {
+                if (write >= INODE_COUNT) goto copy_failed;
+                int created = fs_create_dir(target, fs_name(child));
+                if (created < 0) goto copy_failed;
+                source_dirs[write] = (uint16_t)child;
+                target_dirs[write++] = (uint16_t)created;
+            } else if (copy_file(child, target) < 0) {
+                goto copy_failed;
+            }
+        }
+    }
+    return 0;
+
+copy_failed:
+    fs_delete_tree(copy_root);
+    return -6;
+}
+
+int fs_copy(int inode, uint16_t parent) {
+    if (inode <= 0 || inode >= INODE_COUNT) return -1;
+    return fs_copy_as(inode, parent, fs_name(inode));
+}
+
+int fs_restore_tree(int source_dir, uint16_t dest_dir) {
+    if (!mounted || source_dir <= 0 || source_dir >= INODE_COUNT ||
+        inodes[source_dir].type != 2 || dest_dir >= INODE_COUNT ||
+        inodes[dest_dir].type != 2)
+        return -1;
+    if (source_dir == dest_dir ||
+        inside_directory(dest_dir, (uint16_t)source_dir))
+        return -6;
+    uint16_t source_dirs[INODE_COUNT], target_dirs[INODE_COUNT];
+    int read = 0, write = 1;
+    source_dirs[0] = (uint16_t)source_dir;
+    target_dirs[0] = dest_dir;
+
+    while (read < write) {
+        int source = source_dirs[read];
+        uint16_t target = target_dirs[read++];
+        int children[INODE_COUNT];
+        int count = fs_list((uint16_t)source, children, INODE_COUNT);
+        for (int i = 0; i < count; i++) {
+            int child = children[i];
+            int existing = fs_lookup(target, fs_name(child));
+            if (fs_is_dir(child)) {
+                uint16_t target_child;
+                if (existing >= 0) {
+                    if (!fs_is_dir(existing)) return -2;
+                    target_child = (uint16_t)existing;
+                } else {
+                    int created = fs_create_dir(target, fs_name(child));
+                    if (created < 0) return -3;
+                    target_child = (uint16_t)created;
+                }
+                if (write >= INODE_COUNT) return -4;
+                source_dirs[write] = (uint16_t)child;
+                target_dirs[write++] = target_child;
+            } else {
+                if (existing >= 0 && fs_is_dir(existing)) return -2;
+                uint32_t size = fs_size(child), read_size = 0;
+                if (fs_read(child, copy_buffer, MAX_FILE_BYTES, &read_size) ||
+                    read_size != size ||
+                    fs_write(target, fs_name(child), copy_buffer, size) < 0)
+                    return -5;
+            }
+        }
+    }
+    return 0;
+}
+
+int fs_get_space(uint32_t *total_bytes, uint32_t *used_bytes) {
+    if (!mounted || !total_bytes || !used_bytes) return -1;
+    uint32_t used = 0;
+    for (uint32_t i = 0; i < super->data_blocks; i++)
+        if (bit_get(i)) used++;
+    *total_bytes = super->data_blocks * 512u;
+    *used_bytes = used * 512u;
     return 0;
 }
 

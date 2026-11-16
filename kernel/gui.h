@@ -18,7 +18,16 @@ enum {
     ICON_CHARMAP,
     ICON_CARDFILE,
     ICON_RECYCLE,
-    ICON_SYSTEM
+    ICON_SYSTEM,
+    ICON_CONTROL,
+    ICON_MEDIA,
+    ICON_GEOFIND,
+    ICON_RECENT,
+    ICON_RUN,
+    ICON_HELP,
+    ICON_STORAGE,
+    ICON_WALLPAPER,
+    ICON_MOUSE
 };
 
 enum {
@@ -34,6 +43,7 @@ enum {
 
 #define MENU_MAX 4
 #define ITEM_MAX 8
+#define GUI_TASKBAR_HEIGHT 34
 
 typedef struct Window Window;
 
@@ -95,13 +105,14 @@ int gui_pick(const char *title, char names[][28], int count);
 /* save=1 is Save As, save=0 is Open. dir and name are updated on OK. */
 int gui_file(const char *title, int save, uint16_t *dir, char *name, int namemax);
 void gui_set_launcher(void (*fn)(int fkey));
+void gui_set_start_handler(void (*fn)(void));
 void gui_set_desktop_handler(void (*draw)(void), void (*event)(Event *));
 void gui_focus_desktop(void);
 int gui_desktop_focused(void);
 
 void icons_draw(int id, int x, int y);
 
-/* Session controls used by Program Manager. */
+/* Session controls exposed through GeoDeck. */
 void session_shutdown(void);
 void session_restart(void);
 

@@ -127,25 +127,22 @@ static int boot_console(const BootInfo *bi, const AtaDisk *disk,
 
     boot_line(7, "NEXT", next, COL_WHITE);
     gfx_text(40, gfx_height() - 52,
-             "ENTER continues  F8 opens recovery  or wait for startup.",
+             "F8 opens recovery  |  startup continues in 5 seconds.",
              COL_DKGRAY, COL_BLACK);
     gfx_present();
 
+    /* Defer VMM display changes until the next screen can be painted. */
     uint32_t start = timer_ticks();
-    while ((uint32_t)(timer_ticks() - start) < 300u) {
-        input_poll();
-        int skip = 0, recovery = 0;
-        KeyEvent key;
-        while (input_key(&key))
-            if (key.code == KEY_F8) recovery = 1;
-            else if (key.code == 10 || key.code == 13) skip = 1;
-        MouseEvent mouse;
-        while (input_mouse(&mouse))
-            if (mouse.type == MOUSE_LDOWN) skip = 1;
-        if (recovery) return 1;
-        if (skip) break;
-    }
-    return 0;
+    while ((uint32_t)(timer_ticks() - start) < 500u)
+        input_timer();
+
+    int recovery = 0;
+    KeyEvent key;
+    while (input_key(&key))
+        if (key.code == KEY_F8) recovery = 1;
+    MouseEvent mouse;
+    while (input_mouse(&mouse)) {}
+    return recovery;
 }
 
 static void halt_screen(const char *title, const char *a, const char *b) {
@@ -198,8 +195,13 @@ void kmain(void) {
         halt_screen("GeometricalOS", "This computer needs more memory.", "Give it at least 32 MB of RAM.");
     }
     if (!bi->from_hdd) {
-        boot_console(bi, 0, BOOT_NOT_CHECKED, BOOT_NOT_CHECKED,
-                     "Starting the CD installer");
+        int recovery_requested = boot_console(
+            bi, 0, BOOT_NOT_CHECKED, BOOT_NOT_CHECKED, "Starting the CD installer");
+        if (recovery_requested) {
+            AtaDisk none;
+            memset(&none, 0, sizeof(none));
+            recovery_boot_menu(bi, &none, BOOT_NOT_CHECKED, -1);
+        }
         run_setup();
         reboot();
     }

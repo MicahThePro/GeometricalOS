@@ -153,6 +153,7 @@ static void load_inode(int inode) {
     strncpy(filename, fs_name(inode), sizeof(filename));
     dirty = 0;
     set_title();
+    app_recent_add(inode);
 }
 
 static void open_file(void) {

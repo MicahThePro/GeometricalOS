@@ -19,6 +19,10 @@
 #define COL_PURPLE    0x800080u
 #define COL_CYAN      0x00FFFFu
 #define COL_SETUPBLUE 0x000082u
+#define COL_GEO_DARK  0x10182Bu
+#define COL_GEO_MID   0x1A2A45u
+#define COL_GEO_PALE  0xE8D6AEu
+#define COL_AMBER     0xD9A441u
 
 int gfx_init(void);
 int gfx_width(void);

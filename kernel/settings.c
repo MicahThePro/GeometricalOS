@@ -1,21 +1,22 @@
 #include "settings.h"
 #include "fs.h"
+#include "gfx.h"
 #include "io.h"
 #include "ata.h"
 #include "serial.h"
 
-static int scheme = 0;
+static int scheme = 5;
 static int saver_on = 1;
 static int saver_sec = 45;
 static int mouse_speed = 2;
 static int dbl_ticks = 45;
 static int swap_buttons = 0;
 static int sound_on = 1;
-static int volume = 8;
+static int volume = 15;
 static int timezone_minutes = 0;
-static int wallpaper = 0;
+static int wallpaper = 4;
 static int icon_x[5] = {20, 20, 20, 20, 20};
-static int icon_y[5] = {24, 100, 176, 252, 328};
+static int icon_y[5] = {24, 24, 24, 24, 24};
 static int safe_mode;
 
 static int clamp(int v, int lo, int hi) {
@@ -88,7 +89,7 @@ void settings_load(void) {
     uint32_t n = 0;
     memset(buf, 0, sizeof(buf));
     if (fs_read(id, buf, sizeof(buf) - 1, &n)) return;
-    scheme = clamp(field(buf, "scheme", scheme), 0, 4);
+    scheme = clamp(field(buf, "scheme", scheme), 0, 5);
     saver_on = field(buf, "saveron", saver_on) ? 1 : 0;
     saver_sec = clamp(field(buf, "saver", saver_sec), 5, 300);
     mouse_speed = clamp(field(buf, "mspeed", mouse_speed), 1, 4);
@@ -99,7 +100,7 @@ void settings_load(void) {
     timezone_minutes = clamp(signed_field(buf, "timezone", timezone_minutes), -720, 840);
     if (timezone_minutes % 15) timezone_minutes = 0;
     int migrated_wallpaper = !has_field(buf, "wallpaper");
-    wallpaper = clamp(field(buf, "wallpaper", wallpaper), 0, 3);
+    wallpaper = clamp(field(buf, "wallpaper", wallpaper), 0, 4);
     if (migrated_wallpaper) {
         int legacy = fs_lookup(FS_ROOT, "WALL.CFG");
         char old_wall[8];
@@ -114,6 +115,8 @@ void settings_load(void) {
         key[5] = 'y';
         icon_y[i] = clamp(field(buf, key, icon_y[i]), 0, 10000);
     }
+    int migrated_icon_position = icon_x[4] == 20 && icon_y[4] == 328;
+    if (migrated_icon_position) icon_y[4] = 24;
     serial_write("SET: scheme ");
     serial_dec((uint32_t)scheme);
     serial_write(" sound ");
@@ -121,7 +124,7 @@ void settings_load(void) {
     serial_write(" vol ");
     serial_dec((uint32_t)volume);
     serial_write("\n");
-    if (migrated_wallpaper) settings_save();
+    if (migrated_wallpaper || migrated_icon_position) settings_save();
 }
 
 int settings_save(void) {
@@ -184,23 +187,27 @@ int settings_save(void) {
 }
 
 int settings_scheme(void) { return scheme; }
-void settings_set_scheme(int s) { scheme = clamp(s, 0, 4); settings_save(); }
+void settings_set_scheme(int s) { scheme = clamp(s, 0, 5); settings_save(); }
 
 uint32_t settings_desktop_color(void) {
-    static const uint32_t c[] = {0x008080u, 0x000080u, 0x004020u, 0x202020u, 0x603040u};
+    static const uint32_t c[] = {
+        0x008080u, 0x000080u, 0x004020u, 0x202020u, 0x603040u, COL_GEO_DARK
+    };
     return c[scheme];
 }
 uint32_t settings_title_color(void) {
-    static const uint32_t c[] = {0x000080u, 0x000060u, 0x004000u, 0x404040u, 0x800040u};
+    static const uint32_t c[] = {
+        0x000080u, 0x000060u, 0x004000u, 0x404040u, 0x800040u, COL_GEO_MID
+    };
     return c[scheme];
 }
 uint32_t settings_highlight_color(void) {
-    return settings_title_color();
+    return scheme == 5 ? COL_AMBER : settings_title_color();
 }
 
 int settings_wallpaper(void) { return wallpaper; }
 void settings_set_wallpaper(int id) {
-    wallpaper = clamp(id, 0, 3);
+    wallpaper = clamp(id, 0, 4);
     settings_save();
 }
 int settings_icon_x(int icon) {
@@ -235,24 +242,24 @@ void settings_enter_safe_mode(void) {
     wallpaper = 0;
     for (int i = 0; i < 5; i++) {
         icon_x[i] = 20;
-        icon_y[i] = 24 + i * 76;
+        icon_y[i] = 24;
     }
 }
 void settings_reset_defaults(void) {
     safe_mode = 0;
-    scheme = 0;
+    scheme = 5;
     saver_on = 1;
     saver_sec = 45;
     mouse_speed = 2;
     dbl_ticks = 45;
     swap_buttons = 0;
     sound_on = 1;
-    volume = 8;
+    volume = 15;
     timezone_minutes = 0;
-    wallpaper = 0;
+    wallpaper = 4;
     for (int i = 0; i < 5; i++) {
         icon_x[i] = 20;
-        icon_y[i] = 24 + i * 76;
+        icon_y[i] = 24;
     }
 }
 int settings_safe_mode_active(void) { return safe_mode; }

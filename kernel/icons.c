@@ -123,5 +123,98 @@ void icons_draw(int id, int x, int y) {
         gfx_fill_circle(x + 13, y + 13, 2, COL_WHITE);
         return;
     }
+    if (id == ICON_CONTROL) {
+        gfx_raised(x + 2, y + 3, 28, 26, COL_GRAY);
+        gfx_fill(x + 5, y + 6, 22, 5, COL_NAVY);
+        gfx_fill(x + 6, y + 14, 20, 2, COL_DKGRAY);
+        gfx_fill(x + 6, y + 19, 20, 2, COL_DKGRAY);
+        gfx_fill(x + 6, y + 24, 20, 2, COL_DKGRAY);
+        gfx_raised(x + 11, y + 12, 5, 6, COL_YELLOW);
+        gfx_raised(x + 19, y + 17, 5, 6, COL_LTBLUE);
+        gfx_raised(x + 8, y + 22, 5, 6, COL_GREEN);
+        return;
+    }
+    if (id == ICON_MEDIA) {
+        gfx_fill(x + 3, y + 12, 8, 9, COL_NAVY);
+        gfx_rect(x + 3, y + 12, 8, 9, COL_BLACK);
+        gfx_fill_triangle(x + 10, y + 9, x + 10, y + 24, x + 20, y + 16, COL_AMBER);
+        gfx_line(x + 21, y + 11, x + 26, y + 6, COL_BLACK);
+        gfx_line(x + 23, y + 16, x + 30, y + 16, COL_BLACK);
+        gfx_line(x + 21, y + 21, x + 26, y + 26, COL_BLACK);
+        return;
+    }
+    if (id == ICON_GEOFIND) {
+        gfx_fill(x + 2, y + 12, 25, 16, 0xF0D060);
+        gfx_rect(x + 2, y + 12, 25, 16, COL_BLACK);
+        gfx_fill(x + 4, y + 8, 12, 6, 0xE0C040);
+        gfx_rect(x + 4, y + 8, 12, 6, COL_BLACK);
+        gfx_fill_circle(x + 20, y + 11, 7, COL_WHITE);
+        gfx_circle(x + 20, y + 11, 7, COL_NAVY);
+        gfx_line(x + 25, y + 16, x + 31, y + 23, COL_BLACK);
+        gfx_line(x + 24, y + 15, x + 30, y + 22, COL_DKGRAY);
+        return;
+    }
+    if (id == ICON_RECENT) {
+        gfx_fill(x + 5, y + 3, 17, 25, COL_WHITE);
+        gfx_rect(x + 5, y + 3, 17, 25, COL_BLACK);
+        gfx_hline(x + 8, y + 8, 10, COL_LTBLUE);
+        gfx_hline(x + 8, y + 12, 9, COL_LTBLUE);
+        gfx_hline(x + 8, y + 16, 7, COL_LTBLUE);
+        gfx_fill_circle(x + 23, y + 22, 8, COL_AMBER);
+        gfx_circle(x + 23, y + 22, 8, COL_BLACK);
+        gfx_line(x + 23, y + 22, x + 23, y + 17, COL_BLACK);
+        gfx_line(x + 23, y + 22, x + 27, y + 24, COL_BLACK);
+        return;
+    }
+    if (id == ICON_RUN) {
+        gfx_raised(x + 2, y + 5, 28, 22, COL_GRAY);
+        gfx_fill(x + 5, y + 8, 22, 5, COL_NAVY);
+        gfx_fill(x + 5, y + 15, 16, 8, COL_WHITE);
+        gfx_rect(x + 5, y + 15, 16, 8, COL_DKGRAY);
+        gfx_text(x + 7, y + 16, ">", COL_GREEN, COL_WHITE);
+        gfx_fill_triangle(x + 22, y + 16, x + 22, y + 24, x + 29, y + 20, COL_GREEN);
+        return;
+    }
+    if (id == ICON_HELP) {
+        gfx_fill(x + 3, y + 5, 13, 22, COL_WHITE);
+        gfx_fill(x + 16, y + 5, 13, 22, 0xE8D6AE);
+        gfx_rect(x + 3, y + 5, 26, 22, COL_BLACK);
+        gfx_vline(x + 16, y + 6, 20, COL_NAVY);
+        gfx_hline(x + 6, y + 10, 7, COL_DKGRAY);
+        gfx_hline(x + 19, y + 10, 7, COL_DKGRAY);
+        gfx_text(x + 20, y + 14, "?", COL_RED, 0xE8D6AE);
+        return;
+    }
+    if (id == ICON_STORAGE) {
+        gfx_raised(x + 2, y + 5, 28, 23, COL_GRAY);
+        gfx_fill(x + 5, y + 8, 22, 8, 0x606060);
+        gfx_rect(x + 5, y + 8, 22, 8, COL_BLACK);
+        gfx_fill(x + 7, y + 10, 18, 3, COL_LTBLUE);
+        gfx_fill(x + 6, y + 19, 4, 4, COL_GREEN);
+        gfx_hline(x + 13, y + 21, 12, COL_DKGRAY);
+        gfx_hline(x + 13, y + 24, 12, COL_DKGRAY);
+        return;
+    }
+    if (id == ICON_WALLPAPER) {
+        gfx_fill(x + 3, y + 3, 26, 20, 0x5080C0);
+        gfx_rect(x + 3, y + 3, 26, 20, COL_BLACK);
+        gfx_fill_circle(x + 22, y + 9, 4, COL_YELLOW);
+        gfx_fill_triangle(x + 4, y + 22, x + 14, y + 10, x + 24, y + 22, COL_GREEN);
+        gfx_fill_triangle(x + 13, y + 22, x + 21, y + 14, x + 28, y + 22, COL_LTGREEN);
+        gfx_hline(x + 8, y + 25, 16, COL_BLACK);
+        gfx_vline(x + 15, y + 23, 5, COL_BLACK);
+        gfx_hline(x + 10, y + 29, 12, COL_BLACK);
+        return;
+    }
+    if (id == ICON_MOUSE) {
+        gfx_fill(x + 9, y + 5, 14, 20, COL_WHITE);
+        gfx_fill_circle(x + 16, y + 7, 7, COL_WHITE);
+        gfx_circle(x + 16, y + 12, 10, COL_BLACK);
+        gfx_vline(x + 16, y + 3, 10, COL_BLACK);
+        gfx_hline(x + 10, y + 12, 6, COL_DKGRAY);
+        gfx_hline(x + 16, y + 12, 6, COL_DKGRAY);
+        gfx_fill(x + 15, y + 5, 2, 4, COL_NAVY);
+        return;
+    }
     frame(x, y);
 }

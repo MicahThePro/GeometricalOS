@@ -34,6 +34,7 @@ static int sys_on;
 static Window *sys_win;
 
 static void (*launch_fn)(int fkey);
+static void (*start_fn)(void);
 static void (*desktop_draw_fn)(void);
 static void (*desktop_event_fn)(Event *);
 static int desktop_has_focus;
@@ -46,6 +47,7 @@ enum { HIT_NONE, HIT_SYS, HIT_MIN, HIT_MAX, HIT_CLOSE, HIT_TITLE, HIT_MENU, HIT_
 static int iabs(int v) { return v < 0 ? -v : v; }
 
 void gui_set_launcher(void (*fn)(int fkey)) { launch_fn = fn; }
+void gui_set_start_handler(void (*fn)(void)) { start_fn = fn; }
 void gui_set_desktop_handler(void (*draw)(void), void (*event)(Event *)) {
     desktop_draw_fn = draw;
     desktop_event_fn = event;
@@ -64,6 +66,8 @@ void gui_invalidate(void) { dirty = 1; }
 void gui_screen_resized(void) {
     int sw = gfx_width();
     int sh = gfx_height();
+    int work_h = sh - GUI_TASKBAR_HEIGHT;
+    if (work_h < 1) work_h = sh;
     for (int i = 0; i < MAXW; i++) {
         Window *w = &wins[i];
         if (!w->used) continue;
@@ -71,13 +75,13 @@ void gui_screen_resized(void) {
             w->x = 0;
             w->y = 0;
             w->w = sw;
-            w->h = sh;
+            w->h = work_h;
             continue;
         }
         if (w->w > sw) w->w = sw;
-        if (w->h > sh) w->h = sh;
+        if (w->h > work_h) w->h = work_h;
         if (w->x + w->w > sw) w->x = sw - w->w;
-        if (w->y + w->h > sh) w->y = sh - w->h;
+        if (w->y + w->h > work_h) w->y = work_h - w->h;
         if (w->x < 0) w->x = 0;
         if (w->y < 0) w->y = 0;
     }
@@ -169,7 +173,9 @@ Window *gui_create(const char *title, int w, int h, int icon,
     memset(win, 0, sizeof(*win));
     win->used = 1;
     if (w > gfx_width()) w = gfx_width();
-    if (h > gfx_height()) h = gfx_height();
+    int work_h = gfx_height() - GUI_TASKBAR_HEIGHT;
+    if (work_h < 1) work_h = gfx_height();
+    if (h > work_h) h = work_h;
     if (w < 80) w = 80;
     if (h < 60) h = 60;
     win->w = w;
@@ -209,7 +215,8 @@ static void request_close(Window *w) {
 static void toggle_max(Window *w) {
     if (!w->maximized) {
         w->rx = w->x; w->ry = w->y; w->rw = w->w; w->rh = w->h;
-        w->x = 0; w->y = 0; w->w = gfx_width(); w->h = gfx_height();
+        w->x = 0; w->y = 0; w->w = gfx_width();
+        w->h = gfx_height() - GUI_TASKBAR_HEIGHT;
         w->maximized = 1;
     } else {
         w->x = w->rx; w->y = w->ry; w->w = w->rw; w->h = w->rh;
@@ -363,31 +370,112 @@ static void paint_window(Window *w) {
     gfx_reset_clip();
 }
 
-static void minimized_slot(int index, int *x, int *y) {
-    int col = index % 8;
-    int row = index / 8;
-    *x = 8 + col * 78;
-    *y = gfx_height() - 60 - row * 56;
+static int taskbar_windows(int *start_x, int *slot_w, int *visible,
+                           int *clock_x) {
+    int sw = gfx_width();
+    int start = 106;
+    int clock = sw - 60;
+    int available = clock - start - 6;
+    int count = 0;
+    for (int i = 0; i < MAXW; i++)
+        if (wins[i].used) count++;
+    if (available < 0) available = 0;
+    int slots = available / 58;
+    if (slots > count) slots = count;
+    int width = slots > 0 ? available / slots : 0;
+    if (width > 148) width = 148;
+    *start_x = start;
+    *slot_w = width;
+    *visible = slots;
+    *clock_x = clock;
+    return count;
 }
 
-static void paint_minimized(void) {
+static Window *taskbar_window(int slot) {
     for (int i = 0; i < MAXW; i++) {
-        Window *w = &wins[i];
-        if (!w->used || !w->minimized) continue;
-        int x, y;
-        minimized_slot(i, &x, &y);
-        icons_draw(w->icon ? w->icon : ICON_GROUP, x, y);
-        int hot = (focused == w);
-        int lw = gfx_text_width(w->title);
-        if (lw > 72) lw = 72;
-        int tx = x + 16 - lw / 2;
-        if (tx < 2) tx = 2;
-        if (hot) gfx_fill(tx - 2, y + 34, lw + 4, gfx_font_h(), COL_NAVY);
-        int shown = 0;
-        for (int c = 0; w->title[c] && shown < 9; c++, shown++)
-            gfx_char(tx + shown * 8, y + 34, (unsigned char)w->title[c],
-                     hot ? COL_WHITE : COL_BLACK, hot ? COL_NAVY : COL_TEAL, 1);
+        if (!wins[i].used) continue;
+        if (!slot--) return &wins[i];
     }
+    return 0;
+}
+
+static void paint_taskbar(void) {
+    int sw = gfx_width();
+    int sh = gfx_height();
+    int y = sh - GUI_TASKBAR_HEIGHT;
+    if (y < 0) y = 0;
+    gfx_fill(0, y, sw, GUI_TASKBAR_HEIGHT, COL_GEO_DARK);
+    gfx_fill(0, y, sw, 2, COL_AMBER);
+    gfx_hline(0, sh - 1, sw, COL_GEO_MID);
+
+    int bx = 6, by = y + 5, bw = 94, bh = 24;
+    int hovered = mouse_x >= bx && mouse_x < bx + bw &&
+                  mouse_y >= by && mouse_y < by + bh;
+    uint32_t button = hovered ? COL_AMBER : COL_GEO_MID;
+    gfx_fill(bx, by, bw, bh, button);
+    gfx_rect(bx, by, bw, bh, COL_AMBER);
+    gfx_fill_triangle(bx + 7, by + 18, bx + 15, by + 4,
+                      bx + 23, by + 18, hovered ? COL_GEO_DARK : COL_AMBER);
+    gfx_fill_triangle(bx + 11, by + 18, bx + 15, by + 11,
+                      bx + 19, by + 18, hovered ? COL_GEO_MID : COL_GEO_DARK);
+    gfx_text(bx + 29, by + 4, "GEODESK",
+             hovered ? COL_GEO_DARK : COL_GEO_PALE, button);
+
+    int start_x, slot_w, visible, clock_x;
+    taskbar_windows(&start_x, &slot_w, &visible, &clock_x);
+    for (int i = 0; i < visible; i++) {
+        Window *w = taskbar_window(i);
+        if (!w) continue;
+        int x = start_x + i * slot_w;
+        int active = w == focused && !w->minimized;
+        uint32_t face = active ? COL_AMBER : COL_GEO_MID;
+        uint32_t text = active ? COL_GEO_DARK : COL_GEO_PALE;
+        gfx_fill(x + 2, by, slot_w - 4, bh, face);
+        gfx_rect(x + 2, by, slot_w - 4, bh,
+                 active ? COL_GEO_PALE : 0x394765u);
+        int max_chars = (slot_w - 14) / 8;
+        if (max_chars > 16) max_chars = 16;
+        if (max_chars < 1) continue;
+        char title[17];
+        int n = (int)strlen(w->title);
+        if (n > max_chars) n = max_chars;
+        memcpy(title, w->title, (size_t)n);
+        title[n] = 0;
+        gfx_text(x + 7, by + 4, title, text, face);
+    }
+
+    int seconds = rtc_seconds_of_day();
+    int hour = (seconds / 3600) % 24;
+    int minute = (seconds / 60) % 60;
+    char time[6] = {
+        (char)('0' + hour / 10), (char)('0' + hour % 10), ':',
+        (char)('0' + minute / 10), (char)('0' + minute % 10), 0
+    };
+    gfx_fill(clock_x, by, 54, bh, COL_GEO_DARK);
+    gfx_rect(clock_x, by, 54, bh, COL_GEO_MID);
+    gfx_text(clock_x + 7, by + 4, time, COL_AMBER, COL_GEO_DARK);
+}
+
+static int taskbar_click(int x, int y) {
+    int top = gfx_height() - GUI_TASKBAR_HEIGHT;
+    if (y < top) return 0;
+    if (x >= 6 && x < 100) {
+        if (start_fn) start_fn();
+        gui_invalidate();
+        return 1;
+    }
+    int start_x, slot_w, visible, clock_x;
+    taskbar_windows(&start_x, &slot_w, &visible, &clock_x);
+    if (slot_w > 0 && x >= start_x && x < start_x + visible * slot_w) {
+        int slot = (x - start_x) / slot_w;
+        Window *w = slot < visible ? taskbar_window(slot) : 0;
+        if (w) {
+            if (w == focused && !w->minimized) w->minimized = 1;
+            else gui_restore(w);
+            gui_invalidate();
+        }
+    }
+    return 1;
 }
 
 /* ---------- modal dialogs ---------- */
@@ -804,7 +892,6 @@ static void compose(void) {
     gfx_reset_clip();
     wall_draw();
     if (desktop_draw_fn) desktop_draw_fn();
-    paint_minimized();
     Window *order[MAXW];
     int n = 0;
     for (int i = 0; i < MAXW; i++)
@@ -821,6 +908,7 @@ static void compose(void) {
     for (int i = 0; i < n; i++) paint_window(order[i]);
     paint_menu_dropdown();
     paint_sys_menu();
+    paint_taskbar();
     if (dialog.on) paint_dialog();
     if (prompt.on) paint_prompt_box();
     if (pick.on) paint_pick();
@@ -840,16 +928,6 @@ static Window *top_at(int x, int y) {
         if (!best || w->z >= best->z) best = w;
     }
     return best;
-}
-
-static int minimized_hit(int mx, int my) {
-    for (int i = MAXW - 1; i >= 0; i--) {
-        if (!wins[i].used || !wins[i].minimized) continue;
-        int x, y;
-        minimized_slot(i, &x, &y);
-        if (mx >= x && mx < x + 72 && my >= y && my < y + 52) return i;
-    }
-    return -1;
 }
 
 static void update_menu_hover(void) {
@@ -998,11 +1076,7 @@ static void on_left_down(void) {
         /* fall through so the same click can hit a title or icon */
     }
 
-    int mi = minimized_hit(mouse_x, mouse_y);
-    if (mi >= 0) {
-        gui_restore(&wins[mi]);
-        return;
-    }
+    if (taskbar_click(mouse_x, mouse_y)) return;
 
     Window *w = top_at(mouse_x, mouse_y);
     if (!w) {
@@ -1114,6 +1188,7 @@ static void on_left_up(void) {
 
 static void on_right_down(void) {
     if (modal_active() || menu_on || sys_on) return;
+    if (mouse_y >= gfx_height() - GUI_TASKBAR_HEIGHT) return;
     Window *w = top_at(mouse_x, mouse_y);
     if (!w) {
         if (desktop_event_fn) {
@@ -1141,7 +1216,8 @@ static void on_move(void) {
         drag_win->x = mouse_x - drag_dx;
         drag_win->y = mouse_y - drag_dy;
         if (drag_win->y < 0) drag_win->y = 0;
-        if (drag_win->y > gfx_height() - 24) drag_win->y = gfx_height() - 24;
+        if (drag_win->y > gfx_height() - GUI_TASKBAR_HEIGHT - 24)
+            drag_win->y = gfx_height() - GUI_TASKBAR_HEIGHT - 24;
         if (drag_win->x < 40 - drag_win->w) drag_win->x = 40 - drag_win->w;
         if (drag_win->x > gfx_width() - 40) drag_win->x = gfx_width() - 40;
         gui_invalidate();
@@ -1441,7 +1517,6 @@ static void screensaver(void) {
 }
 
 void gui_pump(void) {
-    sound_tick();
     static int last_sec = -1;
     static int last_input = -1;
     int sec = rtc_seconds_of_day();

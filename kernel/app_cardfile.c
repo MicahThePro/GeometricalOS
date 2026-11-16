@@ -108,6 +108,7 @@ static void load_card(int inode) {
     parent = fs_parent(inode);
     strncpy(filename, fs_name(inode), sizeof(filename));
     dirty = 0;
+    app_recent_add(inode);
 }
 
 static void open_card(void) {

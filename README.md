@@ -2,7 +2,7 @@
 
 A tiny hobby operating system inspired by Windows 3.1, with a real installer, a mouse-driven desktop, and classic apps like Notepad, Paint, and Minesweeper. Runs in VirtualBox.
 
-It is not Linux. It is a 32-bit freestanding kernel with its own bootloader, a small filesystem, and a desktop that looks like Program Manager: teal background, gray 3D windows, and navy title bars.
+It is not Linux. It is a 32-bit freestanding kernel with its own bootloader, a small filesystem, and a geometric workstation desktop. Navy-and-amber colors, a bottom GeoDeck taskbar, and an original patterned wallpaper give it its own identity, while pixel icons, beveled controls, and menu-driven apps keep a 1990s feel.
 
 ![Setup](screenshots/01-setup.png)
 
@@ -10,8 +10,11 @@ It is not Linux. It is a 32-bit freestanding kernel with its own bootloader, a s
 - Boot the CD and run **GeometricalOS Setup**, which partitions the virtual hard disk, formats it, copies the system, and installs a bootloader.
 - Eject the CD and boot GeometricalOS from the hard disk.
 - Log on with the name you chose during Setup. A password is optional.
-- Use the mouse and keyboard on a Windows 3.1-style desktop.
-- Open **File Manager, Notepad, Write, Character Map, Cardfile, Calculator, Clock, Paint, Minesweeper, Terminal, Solitaire, and Snake**.
+- Use the mouse and keyboard on a retro geometric desktop with a bottom taskbar.
+- Open **GeoDeck** for the Workspace, Utilities, and Arcade app groups, or click desktop shortcuts.
+- Open **File Manager, GeoFind, Recent Documents, Run, Help, Disk Space & Backup**, and the classic apps.
+- Each app has its own small pixel-art icon, so similar utilities are easier to tell apart.
+- Cut, copy, paste, rename, and move files in File Manager; search offline by file name, type, or folder.
 - Arrange desktop shortcuts, recover deleted files, and open the startup recovery tools.
 - Pick a geometric wallpaper, wait for the flying-shapes screensaver, and shut down or restart.
 
@@ -90,22 +93,24 @@ In System, Motherboard, boot order:
 7. When Setup finishes, you may remove the installation disk, then press **Enter** to restart.
 8. If the installer disk is still inserted, the startup prompt lets you choose: press a key to boot from the CD/DVD, or wait to start GeometricalOS from the hard drive.
 9. The boot report confirms the hard-disk boot and shows the detected IDE disk and filesystem. The logo appears, then the logon screen. The name you chose is filled in. Press **Enter**.
-10. Program Manager opens on the teal desktop.
+10. The geometric desktop appears. Open GeoDeck from the bottom taskbar to browse apps.
 
 ## Using the desktop
 
 - Drag a window by its title bar. Click a window to bring it to the front.
 - The left title-bar button opens Restore, Minimize, Maximize, and Close. Minimize, maximize, and close are also on the right.
-- Minimized windows sit along the bottom of the desktop. Click one to restore it.
-- Double-click a group icon in Program Manager (**Main**, **Accessories**, **Games**), then double-click a program.
-- **Alt+Tab** cycles windows. **Alt+F4** closes the focused window. On Program Manager, close means exit.
-- **Ctrl+Esc** focuses the desktop shortcuts. Use Tab or the arrow keys to select an icon, then Enter to open it. Drag icons to arrange them; positions are saved.
-- Right-click an empty desktop area for **Sort by Name**, **Sort by Type**, and quick wallpaper choices. Sorted icon positions are saved.
+- Minimized and open windows appear as taskbar tabs. Click a tab to restore it; click the active tab to minimize it.
+- Click **GeoDeck** on the taskbar, double-click a workspace icon (**Workspace**, **Utilities**, **Arcade**), then double-click a program.
+- GeoDeck's **File** menu also offers **Run**, **GeoFind**, **Recent Documents**, and **Disk Space & Backup**. Help → Help Topics has offline guides for every app.
+- **Alt+Tab** cycles windows. **Alt+F4** closes the focused window. Choose **File → Exit GeometricalOS** in GeoDeck to shut down or restart.
+- The desktop has a single **Recycle Bin** icon in the top-left corner. Double-click it to open the bin; drag it to move it.
+- **Ctrl+Esc** focuses the desktop; press Enter to open the Recycle Bin.
+- Right-click an empty desktop area for quick wallpaper choices, including the Navy-and-Amber **Orbit Grid**.
 - **Tab / Shift+Tab** moves focus between buttons. Enter or Space activates the focused button. Use **Alt+F** (or the first letter of another menu) and the arrow keys to navigate menus without a mouse.
-- Press **F8** while the boot report is visible to open Startup Recovery.
+- The boot report stays visible for five seconds. Press **F8** to open Startup Recovery.
 - **File → Exit GeometricalOS** asks Shutdown, Restart, or Cancel. Shutdown shows “It is now safe to turn off your computer.” Press Enter there to try powering off the computer. Restart reboots.
 - The screensaver starts after about 45 seconds with no keyboard or mouse input. Press a key or move the mouse to come back.
-- **Options → Wallpaper** switches between solid teal, tiles, stripes, and diamonds. The choice is saved on disk.
+- **Options → Wallpaper** switches between solid, tiles, stripes, diamonds, and Orbit Grid. The choice is saved on disk.
 
 ### Keyboard shortcuts
 
@@ -127,6 +132,8 @@ In System, Motherboard, boot order:
 | Ctrl+F4 | Cardfile |
 | Ctrl+F5 | System Information and Recovery |
 | Ctrl+F6 | Recycle Bin |
+| Ctrl+X / Ctrl+C / Ctrl+V | Cut / copy / paste in File Manager |
+| F2 (inside File Manager) | Rename the selected item |
 
 ### The programs
 
@@ -138,10 +145,15 @@ In System, Motherboard, boot order:
 - **Clock** — analog and digital local time. Set the date, time, and fixed UTC offset in Control Panel → Date/Time; the offset is saved in `SETTINGS.CFG` and the date/time are written to the hardware RTC. The RTC is treated as UTC, and daylight-saving transitions are not automatic. A working battery-backed RTC is required to keep time while powered off.
 - **Paint** — Pen, Line, Box, Fill, Clear, and 16 colors. Keys: P, L, B, F, C. File → Save writes a `.GIM` picture. File Manager opens those in Paint. Unsaved changes are asked about on close.
 - **Minesweeper** — beginner 9×9 grid, 10 mines. Left click opens, right click flags. The first click is never a mine. Click the face to start over.
-- **File Manager** — folders and files. Delete moves items to the Recycle Bin; deleting an item from the bin permanently removes it. Open `.TXT` in Notepad, `.WRI` in Write, `.CRD` in Cardfile, and `.GIM` pictures in Paint.
+- **File Manager** — folders and files. Use Edit → Cut/Copy/Paste to move or duplicate items; F2 or File → Rename changes a name. Delete moves items to the Recycle Bin. Open `.TXT` in Notepad, `.WRI` in Write, `.CRD` in Cardfile, and `.GIM` pictures in Paint.
+- **GeoFind** — search files by name, extension/type, or containing folder, then open supported documents from the result list.
+- **Recent Documents** — reopen the ten most recently opened text, Write, Paint, and Cardfile documents. Recycled, missing, or renamed entries are ignored.
+- **Run** — launch an app by name or open a supported document by its exact file name.
+- **Help** — offline guides for each app, keyboard shortcuts, and common fixes.
+- **Disk Space & Backup** — view GeoFS used/free space and create or restore a `Backups\Latest` snapshot. This snapshot is stored on the same virtual disk, so it does not protect against disk loss. In the browser version, use **Download backup** to save a portable copy outside the virtual disk.
 - **Recycle Bin** — restore selected items to their original folders or empty the bin to permanently free their disk space. Restoring is refused if the original name is already in use.
 - **Terminal** — type `help`. Commands: `dir` or `ls`, `cd`, `type` or `cat`, `echo`, `cls`, `mkdir`, `del` (moves to Recycle Bin), `ver`, `date`, `time`, `shutdown`, and `restart`.
-- **Control Panel** — color scheme, desktop pattern, screensaver, mouse speed and buttons, date/time and fixed UTC offset, sound, and settings recovery. Display, mouse, sound, clock, wallpaper, and icon-position settings are stored together in `SETTINGS.CFG`; the previous saved settings are kept in `SETTINGS.BAK`.
+- **Control Panel** — color scheme, desktop pattern, screensaver, mouse speed and buttons, date/time and fixed UTC offset, sound (full volume by default), and settings recovery. Display, mouse, sound, clock, wallpaper, and icon-position settings are stored together in `SETTINGS.CFG`; the previous saved settings are kept in `SETTINGS.BAK`.
 - **System Information and Recovery** — show BIOS/video/disk details, restore the last saved settings, or reset settings to defaults. Press F8 during startup for Safe Mode, diagnostics, and settings recovery.
 - **Media Player** — Play, Pause, and Stop for five short built-in tunes, with a position bar. Sound Blaster 16 plays them when that card is selected; otherwise the PC speaker does.
 - **Solitaire** — Klondike, one card at a time. Click the deck to draw. Click a card, then a pile, to move it. Double-click a card to file it on a foundation when the rules allow. Press N for a new game.
@@ -149,9 +161,9 @@ In System, Motherboard, boot order:
 
 ## Run GeometricalOS in a browser
 
-Open the downloaded `index.html` directly, or host it as a static page. No local ISO or other project files are required: the page downloads the installer ISO from this repository's `main` branch on GitHub and loads v86 and its BIOS from public CDNs. The browser needs internet access to start; the guest itself has no configured network adapter.
+The single `geometricalos.html` file embeds the GeometricalOS installer, v86 emulator, WebAssembly runtimes, and BIOS images. Save that file and open it directly in a modern browser; no separate project files, web server, or internet connection are required. The guest has no network adapter.
 
-Start the VM to boot the GitHub-hosted installer ISO into Setup. Click inside the VM display to capture the mouse; press **Esc** to release it. Install to the provided 32 MiB IDE disk, eject the installer disc, and reboot. Disk changes autosave in browser storage; use **Download backup** to keep a portable raw `.img` copy.
+Start the VM to boot the embedded installer ISO into Setup. Click inside the VM display to capture the mouse; press **Esc** to release it. Use **Fill page** to cover the browser page, then press **Esc** or choose **Exit full-page view** to return. Use your browser's F11 key if you want to hide the browser chrome. Install to the provided 32 MiB IDE disk, eject the installer disc, and reboot. Disk changes autosave in browser storage; use **Download backup** to keep a portable raw `.img` copy.
 
 ## Build it yourself (Linux or WSL)
 
@@ -190,7 +202,7 @@ The kernel is freestanding C and NASM. It enters 32-bit protected mode, sets a V
 
 ## Checked in QEMU
 
-The same IDE layout VirtualBox uses was tested with QEMU: hard disk on the primary master, CD on the secondary master, PS/2 mouse, 64 MB RAM, and the standard VGA card. Setup installed onto a blank 32 MB disk, and the next boot came from that disk through logon, Program Manager, and every built-in program.
+The same IDE layout VirtualBox uses was tested with QEMU: hard disk on the primary master, CD on the secondary master, PS/2 mouse, 64 MB RAM, and the standard VGA card. Setup installed onto a blank 32 MB disk, and the next boot came from that disk through logon and into the GeometricalOS desktop.
 
 ## Limits
 

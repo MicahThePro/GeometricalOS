@@ -17,6 +17,9 @@ static int drag_slider = -1;
 static char sound_msg[64];
 
 static const char *icons[] = {"Color", "Desktop", "Mouse", "Date/Time", "Sound", "System"};
+static const int page_icons[] = {
+    ICON_PAINT, ICON_WALLPAPER, ICON_MOUSE, ICON_CLOCK, ICON_MEDIA, ICON_SYSTEM
+};
 
 static void open_page(int id);
 
@@ -129,18 +132,22 @@ static void page_event(Window *w, Event *e) {
         gfx_fill(cx, cy, cw, ch, COL_GRAY);
         gfx_text(cx + 12, cy + 8, icons[which], COL_BLACK, COL_GRAY);
         if (which == 0) {
-            static const char *names[] = {"Teal", "Blue", "Green", "Slate", "Rose"};
-            for (int i = 0; i < 5; i++)
+            static const char *names[] = {
+                "Teal", "Blue", "Green", "Slate", "Rose", "Navy / Amber"
+            };
+            for (int i = 0; i < 6; i++)
                 gfx_button(cx + 16, cy + 36 + i * 32, cw - 32, 26, names[i], settings_scheme() == i);
         } else if (which == 1) {
-            static const char *names[] = {"Solid", "Tiles", "Stripes", "Diamonds"};
-            for (int i = 0; i < 4; i++)
-                gfx_button(cx + 16, cy + 36 + i * 28, 140, 24, names[i], wall_get() == i);
-            gfx_button(cx + 16, cy + 156, 100, 24, settings_saver_on() ? "Saver: on" : "Saver: off", 0);
-            gfx_text(cx + 130, cy + 160, "Wait", COL_BLACK, COL_GRAY);
-            gfx_slider(cx + 16, cy + 188, cw - 32, settings_saver_seconds(), 5, 300, drag_slider == 0);
-            gfx_text(cx + 16, cy + 214, "5s", COL_BLACK, COL_GRAY);
-            gfx_text(cx + cw - 40, cy + 214, "5 min", COL_BLACK, COL_GRAY);
+            static const char *names[] = {
+                "Solid", "Tiles", "Stripes", "Diamonds", "Orbit Grid"
+            };
+            for (int i = 0; i < 5; i++)
+                gfx_button(cx + 16, cy + 36 + i * 24, 140, 21, names[i], wall_get() == i);
+            gfx_button(cx + 16, cy + 160, 100, 24, settings_saver_on() ? "Saver: on" : "Saver: off", 0);
+            gfx_text(cx + 130, cy + 164, "Wait", COL_BLACK, COL_GRAY);
+            gfx_slider(cx + 16, cy + 190, cw - 32, settings_saver_seconds(), 5, 300, drag_slider == 0);
+            gfx_text(cx + 16, cy + 216, "5s", COL_BLACK, COL_GRAY);
+            gfx_text(cx + cw - 40, cy + 216, "5 min", COL_BLACK, COL_GRAY);
         } else if (which == 2) {
             gfx_text(cx + 16, cy + 36, "Slow", COL_BLACK, COL_GRAY);
             gfx_slider(cx + 16, cy + 52, cw - 32, settings_mouse_speed(), 1, 4, drag_slider == 0);
@@ -235,15 +242,15 @@ static void page_event(Window *w, Event *e) {
     if (e->type != EVT_DOWN) return;
     if (which == 0) {
         int i = (e->y - 36) / 32;
-        if (i >= 0 && i < 5 && e->x >= 16) { settings_set_scheme(i); gui_invalidate(); }
+        if (i >= 0 && i < 6 && e->x >= 16) { settings_set_scheme(i); gui_invalidate(); }
     } else if (which == 1) {
-        int i = (e->y - 36) / 28;
-        if (i >= 0 && i < 4 && e->y < 36 + 4 * 28 && e->x >= 16 && e->x < 160) {
+        int i = (e->y - 36) / 24;
+        if (i >= 0 && i < 5 && e->y < 36 + 5 * 24 && e->x >= 16 && e->x < 160) {
             wall_set(i); gui_invalidate();
         }
-        if (e->y >= 156 && e->y < 180 && e->x >= 16 && e->x < 116)
+        if (e->y >= 160 && e->y < 184 && e->x >= 16 && e->x < 116)
             settings_set_saver(!settings_saver_on(), settings_saver_seconds());
-        if (e->y >= 188 && e->y < 214) {
+        if (e->y >= 190 && e->y < 216) {
             drag_slider = 0;
             settings_set_saver(settings_saver_on(), gfx_slider_value(e->x, 16, cw - 32, 5, 300));
         }
@@ -349,11 +356,11 @@ static void open_page(int id) {
         gui_focus(page);
         return;
     }
-    page = gui_create(icons[id], 360, 280, ICON_GROUP, page_event, &page);
+    page = gui_create(icons[id], 360, 280, page_icons[id], page_event, &page);
 }
 
 void app_control_open(void) {
     if (panel) { gui_restore(panel); return; }
-    panel = gui_create("Control Panel", 460, 260, ICON_GROUP, panel_event, &panel);
+    panel = gui_create("Control Panel", 460, 260, ICON_CONTROL, panel_event, &panel);
     serial_write("APP: CONTROL\n");
 }

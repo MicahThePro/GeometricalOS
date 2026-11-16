@@ -301,9 +301,12 @@ static int do_install(const AtaDisk *disk) {
     uint32_t sectors = (bytes + 511u) / 512u;
     if (sectors < 4 || sectors > 900) return 6;
     const uint8_t *image = (const uint8_t *)0x10000u;
-    for (uint32_t s = 0; s < sectors; s++) {
-        if (ata_write(64u + s, image + s * 512u, 1)) return 7;
-        if ((s & 31u) == 0)
+    for (uint32_t s = 0; s < sectors;) {
+        uint32_t count = sectors - s;
+        if (count > 16) count = 16;
+        if (ata_write(64u + s, image + s * 512u, count)) return 7;
+        s += count;
+        if ((s & 31u) == 0 || s == sectors)
             progress_ui(40 + (int)((s * 40u) / sectors), "Copying the system...");
     }
     uint8_t sec[512];
