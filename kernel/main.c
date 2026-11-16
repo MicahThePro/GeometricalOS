@@ -9,6 +9,7 @@
 #include "io.h"
 #include "sound.h"
 #include "settings.h"
+#include "recovery.h"
 
 #define BOOT_NOT_CHECKED (-100)
 
@@ -51,8 +52,8 @@ static void boot_line(int row, const char *label, const char *value, uint32_t co
     gfx_text(240, y, value, color, COL_BLACK);
 }
 
-static void boot_console(const BootInfo *bi, const AtaDisk *disk,
-                         int disk_result, int fs_result, const char *next) {
+static int boot_console(const BootInfo *bi, const AtaDisk *disk,
+                        int disk_result, int fs_result, const char *next) {
     char value[80];
     int n;
 
@@ -126,22 +127,22 @@ static void boot_console(const BootInfo *bi, const AtaDisk *disk,
 
     boot_line(7, "NEXT", next, COL_WHITE);
     gfx_text(40, gfx_height() - 52,
-             "Press ENTER to continue, or wait for automatic startup.",
+             "F8 opens recovery  |  startup continues in 5 seconds.",
              COL_DKGRAY, COL_BLACK);
     gfx_present();
 
+    /* Defer VMM display changes until the next screen can be painted. */
     uint32_t start = timer_ticks();
-    while ((uint32_t)(timer_ticks() - start) < 150u) {
-        input_poll();
-        int skip = 0;
-        KeyEvent key;
-        while (input_key(&key))
-            if (key.code == 10 || key.code == 13) skip = 1;
-        MouseEvent mouse;
-        while (input_mouse(&mouse))
-            if (mouse.type == MOUSE_LDOWN) skip = 1;
-        if (skip) break;
-    }
+    while ((uint32_t)(timer_ticks() - start) < 500u)
+        input_timer();
+
+    int recovery = 0;
+    KeyEvent key;
+    while (input_key(&key))
+        if (key.code == KEY_F8) recovery = 1;
+    MouseEvent mouse;
+    while (input_mouse(&mouse)) {}
+    return recovery;
 }
 
 static void halt_screen(const char *title, const char *a, const char *b) {
@@ -186,26 +187,38 @@ void kmain(void) {
     }
     input_init();
     if (bi->ext_mem_kb && bi->ext_mem_kb < 7000) {
-        boot_console(bi, 0, BOOT_NOT_CHECKED, BOOT_NOT_CHECKED,
+        AtaDisk none;
+        memset(&none, 0, sizeof(none));
+        boot_console(bi, &none, BOOT_NOT_CHECKED, BOOT_NOT_CHECKED,
                      "Boot halted: insufficient extended memory");
+        recovery_boot_menu(bi, &none, BOOT_NOT_CHECKED, -1);
         halt_screen("GeometricalOS", "This computer needs more memory.", "Give it at least 32 MB of RAM.");
     }
     if (!bi->from_hdd) {
-        boot_console(bi, 0, BOOT_NOT_CHECKED, BOOT_NOT_CHECKED,
-                     "Starting the CD installer");
+        int recovery_requested = boot_console(
+            bi, 0, BOOT_NOT_CHECKED, BOOT_NOT_CHECKED, "Starting the CD installer");
+        if (recovery_requested) {
+            AtaDisk none;
+            memset(&none, 0, sizeof(none));
+            recovery_boot_menu(bi, &none, BOOT_NOT_CHECKED, -1);
+        }
         run_setup();
         reboot();
     }
     AtaDisk disk;
     int disk_result = ata_probe(&disk);
     int fs_result = fs_mount();
-    boot_console(bi, &disk, disk_result, fs_result,
-                 fs_result == 0 ? "Starting the installed system" : "Boot halted: disk is not installed");
+    int recovery_requested = boot_console(
+        bi, &disk, disk_result, fs_result,
+        fs_result == 0 ? "Starting the installed system" : "Boot halted: disk is not installed");
     if (fs_result != 0) {
         serial_write("FS: mount failed\n");
+        recovery_boot_menu(bi, &disk, disk_result, fs_result);
         halt_screen("GeometricalOS", "This hard disk is not installed.", "Boot the GeometricalOS CD and run Setup.");
     }
     settings_load();
+    if (recovery_requested && recovery_boot_menu(bi, &disk, disk_result, fs_result))
+        settings_enter_safe_mode();
     splash_screen();
     login_screen();
     desktop_init();

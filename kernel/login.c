@@ -36,6 +36,7 @@ int login_screen(void) {
     int which = pass[0] ? 1 : 0; /* 0 editing name, 1 editing password */
     int nlen = (int)strlen(typed_name);
     int plen = 0;
+    int login_armed = 0;
     serial_write("LOGIN: READY\n");
 
     for (;;) {
@@ -58,7 +59,8 @@ int login_screen(void) {
         for (int s = 0; s < plen && s < 27; s++) stars[s] = '*';
         stars[plen < 27 ? plen : 27] = 0;
         gfx_text(x + 96, y + 142, stars, COL_BLACK, which == 1 ? COL_WHITE : COL_GRAY);
-        gfx_button(x + w - 110, y + h - 36, 90, 24, "Log on", 0);
+        gfx_button(x + w - 110, y + h - 36, 90, 24, "Log on",
+                   login_armed && (mouse_buttons & 1));
         present();
 
         input_poll();
@@ -68,8 +70,19 @@ int login_screen(void) {
             if (m.type == MOUSE_LDOWN) {
                 if (m.x >= x + 90 && m.x < x + 390 && m.y >= y + 88 && m.y < y + 110) which = 0;
                 if (m.x >= x + 90 && m.x < x + 390 && m.y >= y + 138 && m.y < y + 160) which = 1;
-                if (m.x >= x + w - 110 && m.x < x + w - 20 && m.y >= y + h - 36 && m.y < y + h - 12)
-                    clicked = 1;
+                if (m.x >= x + w - 110 && m.x < x + w - 20 &&
+                    m.y >= y + h - 36 && m.y < y + h - 12) {
+                    login_armed = 1;
+                    gfx_button(x + w - 110, y + h - 36, 90, 24, "Log on", 1);
+                    present();
+                }
+            } else if (m.type == MOUSE_LUP && login_armed) {
+                int inside = m.x >= x + w - 110 && m.x < x + w - 20 &&
+                             m.y >= y + h - 36 && m.y < y + h - 12;
+                login_armed = 0;
+                gfx_button(x + w - 110, y + h - 36, 90, 24, "Log on", 0);
+                present();
+                if (inside) clicked = 1;
             }
         }
         KeyEvent k;
@@ -77,7 +90,13 @@ int login_screen(void) {
         while (input_key(&k)) {
             if (k.code == 10 || k.code == 13) {
                 if (which == 0 && pass[0]) which = 1;
-                else submit = 1;
+                else {
+                    gfx_button(x + w - 110, y + h - 36, 90, 24, "Log on", 1);
+                    present();
+                    gfx_button(x + w - 110, y + h - 36, 90, 24, "Log on", 0);
+                    present();
+                    submit = 1;
+                }
             } else if (k.code == 9) which ^= 1;
             else if (k.code == 8) {
                 if (which == 0 && nlen > 0) typed_name[--nlen] = 0;

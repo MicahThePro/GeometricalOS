@@ -30,13 +30,34 @@ static void pc_tone(int freq, int ticks) {
 
 static uint16_t sb_base;
 static int sb_ok;
+static int sb_checked;
+static int sb_dma_active;
+static uint32_t sb_dma_until;
+#define SB16_RATE 11025u
+#define SB16_DMA_ADDR 0x70000u
+#define SB16_MAX_SAMPLES 16000u
+
+static void sb_mixer(uint8_t reg, uint8_t val);
+
+static void sb_set_volume(void) {
+    int vol = settings_volume();
+    if (vol < 0) vol = 0;
+    if (vol > 15) vol = 15;
+    uint8_t level = (uint8_t)(((vol * 31 / 15) << 3) | 0x07);
+    sb_mixer(0x22, level);
+    sb_mixer(0x30, level);
+    sb_mixer(0x31, level);
+    sb_mixer(0x32, level);
+    sb_mixer(0x33, level);
+}
 
 static void sb_udelay(void) {
-    for (int i = 0; i < 8000; i++) inb(0x80);
+    io_wait();
+    io_wait();
 }
 
 static int sb_write_b(uint16_t base, uint8_t v) {
-    for (int i = 0; i < 200000; i++) {
+    for (int i = 0; i < 4096; i++) {
         if (!(inb((uint16_t)(base + 0x0C)) & 0x80)) {
             outb((uint16_t)(base + 0x0C), v);
             return 0;
@@ -51,7 +72,7 @@ static int sb_write(uint8_t v) {
 }
 
 static int sb_read_b(uint16_t base) {
-    for (int i = 0; i < 200000; i++) {
+    for (int i = 0; i < 4096; i++) {
         if (inb((uint16_t)(base + 0x0E)) & 0x80) return inb((uint16_t)(base + 0x0A));
     }
     return -1;
@@ -68,7 +89,7 @@ static int sb_reset_base(uint16_t base) {
     sb_udelay();
     sb_udelay();
     outb((uint16_t)(base + 6), 0);
-    for (int i = 0; i < 400000; i++) {
+    for (int i = 0; i < 20000; i++) {
         if (inb((uint16_t)(base + 0x0E)) & 0x80) {
             if (inb((uint16_t)(base + 0x0A)) == 0xAA) return 1;
         }
@@ -78,7 +99,8 @@ static int sb_reset_base(uint16_t base) {
 
 static int sb16_present(void) {
     static const uint16_t bases[] = {0x220, 0x240, 0x260, 0x280};
-    if (sb_ok) return 1;
+    if (sb_checked) return sb_ok;
+    sb_checked = 1;
     for (int i = 0; i < 4; i++) {
         if (!sb_reset_base(bases[i])) continue;
         sb_base = bases[i];
@@ -86,16 +108,7 @@ static int sb16_present(void) {
         sb_write_b(sb_base, 0xE1);
         int maj = sb_read_b(sb_base);
         int min = sb_read_b(sb_base);
-        int vol = settings_volume();
-        if (vol < 1) vol = 1;
-        if (vol > 15) vol = 15;
-        uint8_t nib = (uint8_t)((vol << 4) | vol);
-        sb_mixer(0x22, nib);
-        uint8_t voice = (uint8_t)(vol << 3);
-        sb_mixer(0x30, voice);
-        sb_mixer(0x31, voice);
-        sb_mixer(0x32, voice);
-        sb_mixer(0x33, voice);
+        sb_set_volume();
         sb_write(0xD1);
         serial_write("SOUND: sb16 at ");
         serial_hex32(sb_base);
@@ -119,12 +132,22 @@ const char *sound_detect_text(void) {
     return "Sound Blaster 16 found.";
 }
 
-/* 8-bit single-cycle DMA on channel 1, the SB16 default. */
-static void sb16_play(const uint8_t *src, uint32_t len) {
-    if (len < 2 || len > 16000) return;
-    uint8_t *buf = (uint8_t *)0x70000;
+static void sb16_stop(void) {
+    if (sb_ok && sb_dma_active) {
+        sb_write(0xD0);
+        outb(0x0A, 0x05);
+        (void)inb((uint16_t)(sb_base + 0x0E));
+    }
+    sb_dma_active = 0;
+}
+
+/* Start 8-bit single-cycle DMA on channel 1 using the fixed low-memory buffer. */
+static int sb16_start(const uint8_t *src, uint32_t len) {
+    if (!src || len < 2 || len > SB16_MAX_SAMPLES || !sb16_present()) return -1;
+    sb16_stop();
+    uint8_t *buf = (uint8_t *)SB16_DMA_ADDR;
     memcpy(buf, src, len);
-    uint32_t addr = 0x70000;
+    uint32_t addr = SB16_DMA_ADDR;
     uint16_t count = (uint16_t)(len - 1);
 
     outb(0x0A, 0x05);
@@ -137,68 +160,60 @@ static void sb16_play(const uint8_t *src, uint32_t len) {
     outb(0x03, (uint8_t)(count >> 8));
     outb(0x0A, 0x01);
 
-    sb_write(0xD1);
-    {
-        int vol = settings_volume();
-        if (vol < 1) vol = 1;
-        if (vol > 15) vol = 15;
-        uint8_t v = (uint8_t)((vol << 4) | vol);
-        sb_mixer(0x22, v);
-        uint8_t voice = (uint8_t)(vol << 3);
-        sb_mixer(0x30, voice);
-        sb_mixer(0x31, voice);
+    sb_set_volume();
+    if (sb_write(0xD1) ||
+        sb_write(0x41) ||
+        sb_write((uint8_t)(SB16_RATE >> 8)) ||
+        sb_write((uint8_t)SB16_RATE) ||
+        sb_write(0x40) ||
+        sb_write(165) ||
+        sb_write(0x14) ||
+        sb_write((uint8_t)count) ||
+        sb_write((uint8_t)(count >> 8))) {
+        outb(0x0A, 0x05);
+        serial_write("SOUND: SB16 DSP did not accept playback\n");
+        return -1;
     }
-    /* DSP 4 output rate, then the classic time constant and 8-bit DMA. */
-    sb_write(0x41);
-    sb_write((uint8_t)(11025 >> 8));
-    sb_write((uint8_t)(11025 & 0xFF));
-    sb_write(0x40);
-    sb_write(165);
-    sb_write(0x14);
-    sb_write((uint8_t)count);
-    sb_write((uint8_t)(count >> 8));
-    for (int i = 0; i < 200000; i++) {
-        if (inb((uint16_t)(sb_base + 0x0E)) & 0x80) {
-            inb((uint16_t)(sb_base + 0x0A));
-            break;
-        }
-    }
-    inb((uint16_t)(sb_base + 0x0F));
+    sb_dma_active = 1;
+    sb_dma_until = timer_ticks() + (len * 100u + SB16_RATE - 1) / SB16_RATE + 2;
+    return 0;
 }
 
-static void fill_tone(uint8_t *dst, int samples, int period, int volume) {
+static void fill_tone(uint8_t *dst, int samples, int freq, int volume) {
+    int period = (int)(SB16_RATE / (2u * (uint32_t)freq));
+    if (period < 1) period = 1;
     for (int i = 0; i < samples; i++)
         dst[i] = (uint8_t)(128 + (((i / period) & 1) ? volume : -volume));
 }
 
 static void play_melody(int shutdown) {
-    /* Speaker tones. ticks are ~10 ms at the 100 Hz timer. */
-    if (shutdown) {
-        pc_tone(392, 10);
-        pc_tone(330, 10);
-        pc_tone(262, 16);
-    } else {
-        pc_tone(523, 8);
-        pc_tone(659, 8);
-        pc_tone(784, 14);
-    }
     if (!sb16_present()) {
         serial_write("SOUND: pc-speaker\n");
+        if (shutdown) {
+            pc_tone(392, 10);
+            pc_tone(330, 10);
+            pc_tone(262, 16);
+        } else {
+            pc_tone(523, 8);
+            pc_tone(659, 8);
+            pc_tone(784, 14);
+        }
         return;
     }
     uint8_t wave[6000];
     if (shutdown) {
-        fill_tone(wave, 2000, 28, 40);
-        fill_tone(wave + 2000, 2000, 33, 40);
-        fill_tone(wave + 4000, 2000, 42, 40);
+        fill_tone(wave, 2000, 392, 40);
+        fill_tone(wave + 2000, 2000, 330, 40);
+        fill_tone(wave + 4000, 2000, 262, 40);
     } else {
-        fill_tone(wave, 1800, 21, 50);
-        fill_tone(wave + 1800, 1800, 17, 50);
-        fill_tone(wave + 3600, 2400, 14, 50);
+        fill_tone(wave, 1800, 523, 50);
+        fill_tone(wave + 1800, 1800, 659, 50);
+        fill_tone(wave + 3600, 2400, 784, 50);
     }
-    sb16_play(wave, 6000);
-    serial_write("SOUND: sb16\n");
-    delay_ticks(40);
+    if (sb16_start(wave, 6000) < 0)
+        serial_write("SOUND: SB16 playback failed\n");
+    else
+        serial_write("SOUND: sb16\n");
 }
 
 void sound_startup(void) {
@@ -229,6 +244,7 @@ static int play_len;
 static int paused;
 static int active;
 static uint32_t note_until;
+static uint8_t note_wave[2048];
 
 static int tune_len(int id) {
     int n = 0;
@@ -262,13 +278,23 @@ static void speaker_freq(int freq) {
 static void start_note(void) {
     if (play_id < 0 || play_note >= play_len) {
         active = 0;
+        play_pos = play_len;
+        sb16_stop();
         speaker_off();
         return;
     }
     int dur = tunes[play_id][play_note].dur;
     if (dur < 1) dur = 1;
     note_until = timer_ticks() + (uint32_t)dur;
-    speaker_freq(tunes[play_id][play_note].freq);
+    if (sb16_present()) {
+        int samples = dur * (int)(SB16_RATE / 100u);
+        int amplitude = settings_volume() * 6;
+        fill_tone(note_wave, samples, tunes[play_id][play_note].freq, amplitude);
+        if (sb16_start(note_wave, (uint32_t)samples) < 0)
+            speaker_freq(tunes[play_id][play_note].freq);
+    } else {
+        speaker_freq(tunes[play_id][play_note].freq);
+    }
 }
 
 int sound_play_id(int id) {
@@ -288,16 +314,22 @@ void sound_stop(void) {
     active = 0;
     paused = 0;
     play_id = -1;
+    sb16_stop();
     speaker_off();
 }
 
 void sound_pause(int on) {
     paused = on ? 1 : 0;
-    if (paused) speaker_off();
+    if (paused) {
+        sb16_stop();
+        speaker_off();
+    }
     else if (active) start_note();
 }
 
 void sound_tick(void) {
+    if (sb_dma_active && (int32_t)(timer_ticks() - sb_dma_until) >= 0)
+        sb16_stop();
     if (!active || paused) return;
     if ((int)(timer_ticks() - note_until) < 0) return;
     play_note++;
@@ -309,11 +341,11 @@ int sound_play_pcm(const unsigned char *pcm, int samples, int rate) {
     (void)rate;
     if (!pcm || samples < 2 || !settings_sound_on()) return -1;
     if (!sb16_present()) {
-        pc_tone(440, 8);
+        pc_tone(440, 2);
         return 0;
     }
     uint32_t n = (uint32_t)samples;
-    if (n > 16000) n = 16000;
+    if (n > SB16_MAX_SAMPLES) n = SB16_MAX_SAMPLES;
     int vol = settings_volume();
     uint8_t scaled[16000];
     for (uint32_t i = 0; i < n; i++) {
@@ -321,19 +353,18 @@ int sound_play_pcm(const unsigned char *pcm, int samples, int rate) {
         s = s * (vol + 1) / 16;
         scaled[i] = (uint8_t)(128 + s);
     }
-    sb16_play(scaled, n);
-    return 0;
+    return sb16_start(scaled, n);
 }
 
-void sound_test(void) {
-    serial_write(sb_ok ? "SOUND: test sb16\n" : "SOUND: test speaker\n");
+int sound_test(void) {
     if (!sb16_present()) {
-        pc_tone(880, 12);
-        pc_tone(660, 12);
-        return;
+        serial_write("SOUND: test speaker\n");
+        pc_tone(880, 3);
+        pc_tone(660, 3);
+        return 1;
     }
+    serial_write("SOUND: test sb16\n");
     uint8_t wave[4000];
-    fill_tone(wave, 4000, 18, 40 + settings_volume());
-    sb16_play(wave, 4000);
-    delay_ticks(30);
+    fill_tone(wave, 4000, 880, 60);
+    return sb16_start(wave, 4000);
 }

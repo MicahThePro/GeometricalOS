@@ -19,11 +19,16 @@
 #define COL_PURPLE    0x800080u
 #define COL_CYAN      0x00FFFFu
 #define COL_SETUPBLUE 0x000082u
+#define COL_GEO_DARK  0x10182Bu
+#define COL_GEO_MID   0x1A2A45u
+#define COL_GEO_PALE  0xE8D6AEu
+#define COL_AMBER     0xD9A441u
 
 int gfx_init(void);
 int gfx_width(void);
 int gfx_height(void);
 int gfx_font_h(void);
+int gfx_set_display_mode(int width, int height);
 
 void gfx_set_clip(int x, int y, int w, int h);
 void gfx_reset_clip(void);
@@ -40,6 +45,8 @@ void gfx_fill_circle(int cx, int cy, int r, uint32_t color);
 void gfx_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint32_t color);
 
 void gfx_char(int x, int y, unsigned char c, uint32_t fg, uint32_t bg, int opaque);
+void gfx_char_style(int x, int y, unsigned char c, uint32_t fg, uint32_t bg,
+                    int opaque, int bold, int italic, int underline);
 void gfx_text(int x, int y, const char *s, uint32_t fg, uint32_t bg);
 void gfx_text_fg(int x, int y, const char *s, uint32_t fg);
 void gfx_text_scaled(int x, int y, const char *s, uint32_t fg, int scale);
@@ -56,6 +63,8 @@ int gfx_button_armed(void);
 int gfx_button_arm_contains(int x, int y);
 void gfx_button_focus(int x, int y, int w, int h);
 int gfx_button_focus_rect(int *x, int *y, int *w, int *h);
+int gfx_button_cycle(int x, int y, int w, int h, int reverse);
+void gfx_button_focus_clear(void);
 void gfx_slider(int x, int y, int w, int val, int lo, int hi, int focused);
 int gfx_slider_value(int x, int track_x, int track_w, int lo, int hi);
 

@@ -281,4 +281,5 @@ void app_notepad_load(int inode) {
     dirty = 0;
     set_title();
     gui_focus(win);
+    app_recent_add(inode);
 }

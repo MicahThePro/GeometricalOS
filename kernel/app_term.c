@@ -128,7 +128,7 @@ static void run_cmd(char *cmd) {
         if (fs_create_dir(cwd, arg) < 0) term_print("Could not create folder");
     } else if (strcmp(op, "del") == 0) {
         int id = fs_lookup(cwd, arg);
-        if (id < 0 || fs_delete(id)) term_print("Could not delete");
+        if (id < 0 || fs_recycle(id)) term_print("Could not move to Recycle Bin");
     } else if (strcmp(op, "date") == 0 || strcmp(op, "time") == 0) {
         RtcTime t;
         rtc_read(&t);

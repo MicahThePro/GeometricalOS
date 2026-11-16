@@ -60,6 +60,65 @@ int gfx_width(void) { return sw; }
 int gfx_height(void) { return sh; }
 int gfx_font_h(void) { return font_h; }
 
+static void dispi_write(uint16_t index, uint16_t value) {
+    outw(0x1CE, index);
+    outw(0x1CF, value);
+}
+
+static uint16_t dispi_read(uint16_t index) {
+    outw(0x1CE, index);
+    return inw(0x1CF);
+}
+
+static void dispi_set_mode(int width, int height, int depth) {
+    dispi_write(4, 0);
+    dispi_write(1, (uint16_t)width);
+    dispi_write(2, (uint16_t)height);
+    dispi_write(3, (uint16_t)depth);
+    dispi_write(6, (uint16_t)width);
+    dispi_write(8, 0);
+    dispi_write(9, 0);
+    dispi_write(4, 0x41);
+}
+
+int gfx_set_display_mode(int width, int height) {
+    const uint32_t max_pixels = (5u * 1024u * 1024u) / sizeof(uint32_t);
+    if (width < 640 || height < 480 || width > 1280 || height > 1024 ||
+        (uint32_t)width * (uint32_t)height > max_pixels)
+        return 0;
+
+    if (dispi_read(0) < 0xB0C0) return 0;
+
+    int old_width = sw;
+    int old_height = sh;
+    int old_bpp = bpp;
+    dispi_set_mode(width, height, 32);
+    if (dispi_read(1) != (uint16_t)width ||
+        dispi_read(2) != (uint16_t)height ||
+        dispi_read(3) != 32 || dispi_read(4) != 0x41) {
+        dispi_set_mode(old_width, old_height, old_bpp);
+        return 0;
+    }
+
+    sw = width;
+    sh = height;
+    bpp = 32;
+    pitch = width * 4;
+    red_size = green_size = blue_size = 8;
+    red_pos = 16;
+    green_pos = 8;
+    blue_pos = 0;
+    fast32 = 1;
+    gfx_reset_clip();
+    cur_x = cur_y = -32;
+    shown_x = shown_y = -64;
+    dirty = 1;
+    dx0 = dy0 = 0;
+    dx1 = sw;
+    dy1 = sh;
+    return 1;
+}
+
 static uint32_t pack_color(uint32_t rgb) {
     uint32_t r = (rgb >> 16) & 0xFF;
     uint32_t g = (rgb >> 8) & 0xFF;
@@ -266,6 +325,26 @@ void gfx_char(int x, int y, unsigned char c, uint32_t fg, uint32_t bg, int opaqu
     }
 }
 
+void gfx_char_style(int x, int y, unsigned char c, uint32_t fg, uint32_t bg,
+                    int opaque, int bold, int italic, int underline) {
+    if (font_fallback && c >= 128) c = ' ';
+    const uint8_t *g = font + (unsigned)c * (unsigned)font_h;
+    for (int row = 0; row < font_h; row++) {
+        uint8_t bits = g[row];
+        if (bold) bits |= bits >> 1;
+        int slant = italic ? (font_h - 1 - row) / 5 : 0;
+        for (int col = 0; col < 8; col++) {
+            int on = (bits & (0x80 >> col)) != 0;
+            if (on) {
+                gfx_pixel(x + col + slant, y + row, fg);
+            } else if (opaque) {
+                gfx_pixel(x + col + slant, y + row, bg);
+            }
+        }
+    }
+    if (underline) gfx_hline(x, y + font_h - 2, 8, fg);
+}
+
 void gfx_text(int x, int y, const char *s, uint32_t fg, uint32_t bg) {
     while (*s) {
         gfx_char(x, y, (unsigned char)*s++, fg, bg, 1);
@@ -343,7 +422,7 @@ void gfx_button(int x, int y, int w, int h, const char *label, int pressed) {
         nbtns++;
     }
     int inside = mouse_x >= x && mouse_x < x + w && mouse_y >= y && mouse_y < y + h;
-    int hot = arm_on && same_btn(x, y, w, h, arm_x, arm_y, arm_w, arm_h) && inside && (mouse_buttons & 1);
+    int hot = arm_on && same_btn(x, y, w, h, arm_x, arm_y, arm_w, arm_h) && inside;
     int down = pressed || hot;
     if (down) gfx_sunken(x, y, w, h, COL_GRAY);
     else gfx_raised(x, y, w, h, COL_GRAY);
@@ -391,6 +470,26 @@ int gfx_button_focus_rect(int *x, int *y, int *w, int *h) {
     if (h) *h = foc_h;
     return 1;
 }
+
+int gfx_button_cycle(int x, int y, int w, int h, int reverse) {
+    int matches[48], count = 0, current = -1;
+    for (int i = 0; i < nbtns; i++) {
+        int cx = btns[i].x + btns[i].w / 2;
+        int cy = btns[i].y + btns[i].h / 2;
+        if (cx < x || cy < y || cx >= x + w || cy >= y + h) continue;
+        if (foc_on && same_btn(btns[i].x, btns[i].y, btns[i].w, btns[i].h,
+                               foc_x, foc_y, foc_w, foc_h))
+            current = count;
+        matches[count++] = i;
+    }
+    if (!count) return 0;
+    int next = current < 0 ? (reverse ? count - 1 : 0) :
+               (current + (reverse ? count - 1 : 1)) % count;
+    int i = matches[next];
+    gfx_button_focus(btns[i].x, btns[i].y, btns[i].w, btns[i].h);
+    return 1;
+}
+void gfx_button_focus_clear(void) { foc_on = 0; }
 
 void gfx_slider(int x, int y, int w, int val, int lo, int hi, int focused) {
     if (w < 40) w = 40;

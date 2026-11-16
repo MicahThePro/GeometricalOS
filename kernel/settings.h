@@ -28,4 +28,15 @@ void settings_set_sound(int on, int volume);
 int settings_timezone_minutes(void);
 int settings_set_timezone_minutes(int minutes);
 
+int settings_wallpaper(void);
+void settings_set_wallpaper(int id);
+int settings_icon_x(int icon);
+int settings_icon_y(int icon);
+void settings_set_icon_position(int icon, int x, int y);
+void settings_set_icon_positions(const int x[5], const int y[5]);
+void settings_enter_safe_mode(void);
+int settings_safe_mode_active(void);
+void settings_reset_defaults(void);
+int settings_restore_backup(void);
+
 #endif

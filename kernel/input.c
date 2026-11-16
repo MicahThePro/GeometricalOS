@@ -4,6 +4,7 @@
 #include "vmm.h"
 #include "serial.h"
 #include "settings.h"
+#include "sound.h"
 
 int mouse_x, mouse_y, mouse_buttons;
 
@@ -286,9 +287,12 @@ void input_poll(void) {
         if (st & 0x20) mouse_feed(d);
         else kbd_feed(d);
     }
+    if (vmm_display_poll())
+        mouse_clamp();
     if (vmm_mouse_poll(&mouse_x, &mouse_y, gfx_width(), gfx_height()))
         mouse_clamp();
     input_timer();
+    sound_tick();
 }
 
 int input_key(KeyEvent *ev) {

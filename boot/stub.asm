@@ -738,18 +738,25 @@ consider_mode:
 .have_bpp:
     mov ax, [es:0x3000 + 0x12]
     mov dx, [es:0x3000 + 0x14]
-    cmp ax, 800
+    cmp ax, 1280
     jne .c1024
-    cmp dx, 600
+    cmp dx, 720
     jne .c1024
-    add bl, 50
+    add bl, 60
     jmp .score
 .c1024:
     cmp ax, 1024
-    jne .c640
+    jne .c800
     cmp dx, 768
+    jne .c800
+    add bl, 55
+    jmp .score
+.c800:
+    cmp ax, 800
     jne .c640
-    add bl, 45
+    cmp dx, 600
+    jne .c640
+    add bl, 50
     jmp .score
 .c640:
     cmp ax, 640

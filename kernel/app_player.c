@@ -50,6 +50,6 @@ static void player_event(Window *w, Event *e) {
 
 void app_player_open(void) {
     if (win) { gui_restore(win); return; }
-    win = gui_create("Media Player", 360, 320, ICON_NOTE, player_event, &win);
+    win = gui_create("Media Player", 360, 320, ICON_MEDIA, player_event, &win);
     serial_write("APP: PLAYER\n");
 }

@@ -6,5 +6,7 @@ int vmm_mouse_init(void);
 int vmm_mouse_absolute(void);
 /* Writes screen coordinates. Returns 1 if a new absolute position was applied. */
 int vmm_mouse_poll(int *x, int *y, int sw, int sh);
+/* Checks for and applies a host display resize request. */
+int vmm_display_poll(void);
 
 #endif
