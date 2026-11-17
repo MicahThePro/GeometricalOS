@@ -4,7 +4,8 @@
 #include <stdint.h>
 
 #define FS_ROOT 0
-#define FS_MAX_FILE_BYTES (280u * 512u)
+#define FS_MAX_FILE_BYTES (512u * 1024u)
+#define FS_LARGE_BUFFER_ADDRESS 0x1F04000u
 
 typedef struct {
     uint32_t disk_sectors;
@@ -28,6 +29,8 @@ int fs_recycle(int inode);
 int fs_restore(int inode);
 int fs_rename(int inode, const char *name);
 int fs_move(int inode, uint16_t parent);
+int fs_desktop_cell(int inode);
+int fs_set_desktop_cell(int inode, int cell);
 int fs_copy(int inode, uint16_t parent);
 int fs_copy_as(int inode, uint16_t parent, const char *name);
 int fs_restore_tree(int source_dir, uint16_t dest_dir);

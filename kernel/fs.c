@@ -1,5 +1,6 @@
 #include "fs.h"
 #include "ata.h"
+#include "bootinfo.h"
 #include "io.h"
 #include "serial.h"
 
@@ -37,8 +38,15 @@ _Static_assert(sizeof(Super) <= 512, "GeoFS superblock must fit in one sector");
 static Super *super = (Super *)0x640000;
 static Inode *inodes = (Inode *)0x641000;
 static uint8_t *bitmap = (uint8_t *)0x650000;
-static uint8_t *copy_buffer = (uint8_t *)0x740000;
+static uint8_t *copy_buffer = (uint8_t *)FS_LARGE_BUFFER_ADDRESS;
 static int mounted;
+
+static int copy_buffer_available(void) {
+    const BootInfo *info = bootinfo();
+    uint64_t memory_end = 0x100000ull + (uint64_t)info->ext_mem_kb * 1024u;
+    return info->magic == BOOTINFO_MAGIC &&
+           memory_end >= (uint64_t)FS_LARGE_BUFFER_ADDRESS + FS_MAX_FILE_BYTES;
+}
 
 static int bit_get(uint32_t i) {
     return (bitmap[i >> 3] >> (i & 7)) & 1;
@@ -385,9 +393,31 @@ int fs_move(int inode, uint16_t parent) {
     return 0;
 }
 
+int fs_desktop_cell(int inode) {
+    if (!mounted || inode <= 0 || inode >= INODE_COUNT ||
+        !inodes[inode].type || inodes[inode].unused[1] == 0)
+        return -1;
+    return (int)inodes[inode].unused[1] - 1;
+}
+
+int fs_set_desktop_cell(int inode, int cell) {
+    if (!mounted || inode <= 0 || inode >= INODE_COUNT ||
+        !inodes[inode].type || cell < -1)
+        return -1;
+    uint32_t old_cell = inodes[inode].unused[1];
+    inodes[inode].unused[1] = cell < 0 ? 0u : (uint32_t)cell + 1u;
+    if (fs_sync()) {
+        inodes[inode].unused[1] = old_cell;
+        fs_sync();
+        return -1;
+    }
+    return 0;
+}
+
 static int copy_file_as(int source, uint16_t parent, const char *name) {
     uint32_t size = fs_size(source), read_size = 0;
-    if (fs_read(source, copy_buffer, FS_MAX_FILE_BYTES, &read_size) ||
+    if (!copy_buffer_available() ||
+        fs_read(source, copy_buffer, FS_MAX_FILE_BYTES, &read_size) ||
         read_size != size)
         return -1;
     int copied = fs_write(parent, name, copy_buffer, size);
@@ -455,6 +485,7 @@ int fs_restore_tree(int source_dir, uint16_t dest_dir) {
         inodes[source_dir].type != 2 || dest_dir >= INODE_COUNT ||
         inodes[dest_dir].type != 2)
         return -1;
+    if (!copy_buffer_available()) return -1;
     if (source_dir == dest_dir ||
         inside_directory(dest_dir, (uint16_t)source_dir))
         return -6;

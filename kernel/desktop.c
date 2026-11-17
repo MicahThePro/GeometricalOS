@@ -36,6 +36,8 @@ static int desktop_file_drag_started;
 static void refresh_desktop_files(void);
 static int desktop_file_position(int index, int *x, int *y);
 static int desktop_file_at(int x, int y);
+static int desktop_cell_at(int x, int y);
+static int desktop_first_free_cell(int except_inode);
 static int recycle_icon_hit(int x, int y);
 static void draw_desktop_file(int x, int y, int id, int selected);
 
@@ -72,6 +74,21 @@ int desktop_files_dir(void) {
 static void refresh_desktop_files(void) {
     int dir = desktop_files_dir();
     desktop_item_count = dir < 0 ? 0 : fs_list((uint16_t)dir, desktop_items, 160);
+    int capacity = desktop_file_capacity();
+    int used[160];
+    memset(used, 0, sizeof(used));
+    for (int i = 0; i < desktop_item_count; i++) {
+        int id = desktop_items[i];
+        int cell = fs_desktop_cell(id);
+        if (cell < 0 || cell >= capacity || used[cell]) {
+            for (cell = 0; cell < capacity; cell++)
+                if (!used[cell]) break;
+        }
+        if (cell >= capacity) continue;
+        used[cell] = 1;
+        if (fs_desktop_cell(id) != cell && fs_set_desktop_cell(id, cell))
+            serial_write("DESKTOP: could not save file icon position\n");
+    }
 }
 
 static int recycle_icon_hit(int x, int y) {
@@ -187,7 +204,10 @@ static void desktop_draw(void) {
     refresh_desktop_files();
     for (int i = 0; i < desktop_item_count; i++) {
         int file_x, file_y;
-        if (!desktop_file_position(i, &file_x, &file_y)) break;
+        int cell = fs_desktop_cell(desktop_items[i]);
+        if (cell < 0 ||
+            !desktop_file_position(cell, &file_x, &file_y))
+            continue;
         draw_desktop_file(file_x, file_y, desktop_items[i],
                           desktop_items[i] == desktop_file_selected);
     }
@@ -266,33 +286,71 @@ static void desktop_event(Event *e) {
         desktop_file_drag_started = 0;
     } else if (e->type == EVT_DROP) {
         int inode = e->code;
-        int destination;
-        int dropping_on_background = 0;
+        int desktop = desktop_files_dir();
+        if (desktop < 0 || inode <= 0 || !fs_type(inode)) return;
+        refresh_desktop_files();
         if (recycle_icon_hit(e->x, e->y)) {
-            destination = fs_recycle_bin();
-        } else {
-            int target = desktop_file_at(e->x, e->y);
-            if (target > 0 && fs_is_dir(target) && target != inode) {
-                destination = target;
-            } else {
-                destination = desktop_files_dir();
-                dropping_on_background = 1;
-            }
+            if (app_files_move_inode(inode, fs_recycle_bin()))
+                gui_dialog("Desktop", "Could not move that item to the Recycle Bin.",
+                           "OK", 0, 0);
+            else
+                gui_invalidate();
+            return;
         }
-        if (dropping_on_background && destination >= 0 &&
-            fs_parent(inode) != (uint16_t)destination) {
-            int items[160];
-            if (fs_list((uint16_t)destination, items, 160) >=
-                desktop_file_capacity()) {
-                gui_dialog("Desktop",
-                           "The Desktop is full. Move or delete an item first.",
+
+        int target = desktop_file_at(e->x, e->y);
+        if (target == inode) return;
+        if (target > 0 && fs_is_dir(target)) {
+            if (app_files_move_inode(inode, target))
+                gui_dialog("Desktop", "Could not move that item into the folder.",
+                           "OK", 0, 0);
+            else
+                gui_invalidate();
+            return;
+        }
+
+        int destination_cell = desktop_cell_at(e->x, e->y);
+        if (destination_cell < 0) return;
+        int source_is_desktop = fs_parent(inode) == (uint16_t)desktop;
+        int source_cell = fs_desktop_cell(inode);
+        if (target > 0) {
+            int target_cell = fs_desktop_cell(target);
+            if (source_is_desktop) {
+                if (source_cell < 0 || target_cell < 0 ||
+                    fs_set_desktop_cell(target, source_cell)) {
+                    gui_dialog("Desktop", "Could not move that icon.",
+                               "OK", 0, 0);
+                    return;
+                }
+                if (fs_set_desktop_cell(inode, target_cell)) {
+                    if (fs_set_desktop_cell(target, target_cell))
+                        serial_write("DESKTOP: icon swap rollback failed\n");
+                    gui_dialog("Desktop", "Could not move that icon.",
+                               "OK", 0, 0);
+                    return;
+                }
+                gui_invalidate();
+                return;
+            }
+            int spare_cell = desktop_first_free_cell(inode);
+            if (spare_cell < 0) {
+                gui_dialog("Desktop", "The Desktop is full. Move or delete an item first.",
                            "OK", 0, 0);
                 return;
             }
+            if (app_files_move_inode(inode, desktop) ||
+                fs_set_desktop_cell(target, spare_cell) ||
+                fs_set_desktop_cell(inode, target_cell)) {
+                gui_dialog("Desktop", "Could not move that icon.",
+                           "OK", 0, 0);
+                return;
+            }
+            gui_invalidate();
+            return;
         }
-        int result = destination < 0 ? -1 :
-                     app_files_move_inode(inode, destination);
-        if (result)
+
+        if (app_files_move_inode(inode, desktop) ||
+            fs_set_desktop_cell(inode, destination_cell))
             gui_dialog("Desktop", "Could not move that item here.",
                        "OK", 0, 0);
         else
@@ -405,11 +463,43 @@ static int desktop_file_at(int x, int y) {
     refresh_desktop_files();
     for (int i = 0; i < desktop_item_count; i++) {
         int icon_x, icon_y;
-        if (!desktop_file_position(i, &icon_x, &icon_y)) break;
+        int cell = fs_desktop_cell(desktop_items[i]);
+        if (cell < 0 ||
+            !desktop_file_position(cell, &icon_x, &icon_y))
+            continue;
         if (x >= icon_x - 8 && x < icon_x + 88 &&
             y >= icon_y - 4 &&
             y < icon_y + 36 + 2 * gfx_font_h())
             return desktop_items[i];
+    }
+    return -1;
+}
+
+static int desktop_cell_at(int x, int y) {
+    int capacity = desktop_file_capacity();
+    for (int cell = 0; cell < capacity; cell++) {
+        int icon_x, icon_y;
+        if (!desktop_file_position(cell, &icon_x, &icon_y)) break;
+        if (x >= icon_x - 8 && x < icon_x + 88 &&
+            y >= icon_y - 4 &&
+            y < icon_y + 36 + 2 * gfx_font_h())
+            return cell;
+    }
+    return -1;
+}
+
+static int desktop_first_free_cell(int except_inode) {
+    int capacity = desktop_file_capacity();
+    for (int cell = 0; cell < capacity; cell++) {
+        int occupied = 0;
+        for (int i = 0; i < desktop_item_count; i++) {
+            if (desktop_items[i] != except_inode &&
+                fs_desktop_cell(desktop_items[i]) == cell) {
+                occupied = 1;
+                break;
+            }
+        }
+        if (!occupied) return cell;
     }
     return -1;
 }

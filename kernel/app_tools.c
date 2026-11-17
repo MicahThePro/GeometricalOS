@@ -294,7 +294,8 @@ static const HelpTopic help_topics[] = {
     {"File Manager", "Open folders with a double-click; use Up or Backspace to return. "
      "Open supported TXT, WRI, CRD, GIM, and image files. "
      "Drag an item onto a folder to move it, onto the Desktop to show it there, or onto "
-     "the Recycle Bin to delete it. Right-click for Open, Rename, Delete, Cut, Copy, "
+     "the Recycle Bin to delete it. Rearrange desktop icons by dragging to an empty spot "
+     "or onto another icon. Right-click for Open, Rename, Delete, Cut, Copy, "
      "and Paste Here. Edit > Cut/Copy/Paste and F2 rename also work."},
     {"GeoFind", "Searches file names, extensions, and folder names. A matching folder "
      "shows its files. Select a result to open TXT, WRI, GIM, CRD, PNG, JPG, JPEG, or WEBP files."},
@@ -324,6 +325,7 @@ static const HelpTopic help_topics[] = {
      "connection or streaming service is used."},
     {"FTP Server", "Transfers files with FileZilla over VirtualBox Host-only networking. "
      "The anonymous, unencrypted server exposes only files in the Transfer folder. "
+     "Files can be up to 512 KiB; the server requires at least 32 MB of VM RAM. "
      "Use plain FTP on the private Host-only network only."},
     {"Character Map", "Choose a character to inspect or copy it for use in a text document."},
     {"Cardfile", "Create small cards, browse them, and save them as CRD files."},

@@ -104,7 +104,7 @@ In System, Motherboard, boot order:
 - Click **GeoDeck** on the taskbar, double-click a workspace icon (**Workspace**, **Utilities**, **Arcade**), then double-click a program.
 - GeoDeck's **File** menu also offers **Run**, **GeoFind**, **Recent Documents**, and **Disk Space & Backup**. Help → Help Topics has offline guides for every app.
 - **Alt+Tab** cycles windows. **Alt+F4** closes the focused window. Choose **File → Exit GeometricalOS** in GeoDeck to shut down or restart.
-- The desktop has a **Recycle Bin** icon and shows files moved into its `Desktop` folder. Double-click files or folders to open them; drag files onto folders or the bin to move or delete them.
+- The desktop has a **Recycle Bin** icon and shows files moved into its `Desktop` folder. Double-click files or folders to open them; drag icons to rearrange them, onto folders to move them, or onto the bin to delete them.
 - **Ctrl+Esc** focuses the desktop; press Enter to open the Recycle Bin.
 - Right-click an empty desktop area for quick wallpaper choices, including the Navy-and-Amber **Orbit Grid**.
 - **Tab / Shift+Tab** moves focus between buttons. Enter or Space activates the focused button. Use **Alt+F** (or the first letter of another menu) and the arrow keys to navigate menus without a mouse.
@@ -127,7 +127,7 @@ The **FTP Server** utility shares only the `Transfer` folder with FileZilla. It 
    - Encryption: **Only use plain FTP (insecure)**
    - Logon type: **Anonymous**
    - Transfer Settings: **Passive**
-6. Connect. The server's `/` is the GeometricalOS `Transfer` folder. Use File Manager to put files there before connecting, or drag files in FileZilla to upload them. The File Manager refreshes an open folder every second; drag transferred files onto the Desktop to move them out of `Transfer`. FileZilla cannot receive directory-change notifications over FTP, so press F5 in its remote pane to see files added from GeometricalOS. Downloads are limited to files in `Transfer`. Individual files are limited to 140 KiB by GeoFS.
+6. Connect. The server's `/` is the GeometricalOS `Transfer` folder. Use File Manager to put files there before connecting, or drag files in FileZilla to upload them. The File Manager refreshes an open folder every second; drag transferred files onto the Desktop to move them out of `Transfer`. FileZilla cannot receive directory-change notifications over FTP, so press F5 in its remote pane to see files added from GeometricalOS. Downloads are limited to files in `Transfer`. Individual files are limited to 512 KiB by GeoFS; FTP requires a VM with at least 32 MB of RAM.
 
 Plain FTP does not encrypt files or credentials. Use this only on the private Host-only link and stop the server when finished. The minimal PCnet/IP/TCP implementation is intended for this VirtualBox adapter and does not provide DHCP, Internet routing, TLS, or active FTP.
 
@@ -158,14 +158,14 @@ Plain FTP does not encrypt files or credentials. Use this only on the private Ho
 
 - **Notepad** — File → New, Open, Save, and Save As. The dialog lists folders and files, has a file-name box, and OK / Cancel. Closing a changed document asks whether to save. Files stay on the GeoFS disk across reboots. Open `.TXT` from File Manager.
 - **Write** — a simple word processor with bold, italic, underline, and paragraph alignment. Save and reopen its own `.WRI` format; Ctrl+B/I/U toggle styles, Ctrl+S saves, and Ctrl+V inserts the character selected in Character Map.
-- **Image Viewer** — opens `.PNG`, `.JPG`, `.JPEG`, and `.WEBP` images from File Manager or its File → Open menu, and fits the picture to the window. It needs at least 32 MB of VM memory; images are limited to 2.1 megapixels and GeoFS's 140 KiB file-size limit.
+- **Image Viewer** — opens `.PNG`, `.JPG`, `.JPEG`, and `.WEBP` images from File Manager or its File → Open menu, and fits the picture to the window. It needs at least 32 MB of VM memory; images are limited to 2.1 megapixels and GeoFS's 512 KiB file-size limit.
 - **Character Map** — browse the printable ASCII characters with the keyboard or mouse, then Copy and paste the selection into Write with Ctrl+V.
 - **Cardfile** — create titled note cards, edit them with the keyboard, and save/open them as `.CRD` files.
 - **Calculator** — mouse or keyboard. `+ - * /`, decimal point, backspace, and C.
 - **Clock** — analog and digital local time. Set the date, time, and fixed UTC offset in Control Panel → Date/Time; the offset is saved in `SETTINGS.CFG` and the date/time are written to the hardware RTC. The RTC is treated as UTC, and daylight-saving transitions are not automatic. A working battery-backed RTC is required to keep time while powered off.
 - **Paint** — Pen, Line, Box, Fill, Clear, and 16 colors. Keys: P, L, B, F, C. File → Save writes a `.GIM` picture. File Manager opens those in Paint. Unsaved changes are asked about on close.
 - **Minesweeper** — beginner 9×9 grid, 10 mines. Left click opens, right click flags. The first click is never a mine. Click the face to start over.
-- **File Manager** — drag items onto folders to move them, onto the Desktop to put them on the desktop, or onto the Recycle Bin to delete them. Right-click for Open, Rename, Delete, Cut, Copy, and Paste Here; Edit → Cut/Copy/Paste and F2 are also available. Open `.TXT` in Notepad, `.WRI` in Write, `.CRD` in Cardfile, and `.GIM` pictures in Paint.
+- **File Manager** — drag items onto folders to move them, onto the Desktop to put them there, or onto the Recycle Bin to delete them. Rearrange desktop icons by dragging them to an empty spot or onto another icon to swap places. Right-click for Open, Rename, Delete, Cut, Copy, and Paste Here; Edit → Cut/Copy/Paste and F2 are also available. Open `.TXT` in Notepad, `.WRI` in Write, `.CRD` in Cardfile, and `.GIM` pictures in Paint.
 - **GeoFind** — search files by name, extension/type, or containing folder, then open supported documents from the result list.
 - **Recent Documents** — reopen the ten most recently opened text, Write, Paint, and Cardfile documents. Recycled, missing, or renamed entries are ignored.
 - **Run** — launch an app by name or open a supported document by its exact file name.

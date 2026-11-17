@@ -2,6 +2,7 @@
 #include "gui.h"
 #include "gfx.h"
 #include "fs.h"
+#include "bootinfo.h"
 #include "net.h"
 #include "input.h"
 #include "serial.h"
@@ -15,7 +16,7 @@
 #define FTP_REPLY_COUNT 8u
 #define FTP_REPLY_SIZE 128u
 #define FTP_CONNECT_TIMEOUT 3000u
-#define FTP_TRANSFER_BUFFER ((uint8_t *)0x764000)
+#define FTP_TRANSFER_BUFFER ((uint8_t *)FS_LARGE_BUFFER_ADDRESS)
 
 enum {
     FTP_XFER_NONE,
@@ -54,6 +55,13 @@ typedef struct {
 
 static FtpServer server;
 static uint16_t next_passive_port = FTP_PASSIVE_FIRST;
+
+static int transfer_buffer_available(void) {
+    const BootInfo *info = bootinfo();
+    uint64_t memory_end = 0x100000ull + (uint64_t)info->ext_mem_kb * 1024u;
+    return info->magic == BOOTINFO_MAGIC &&
+           memory_end >= (uint64_t)FS_LARGE_BUFFER_ADDRESS + FS_MAX_FILE_BYTES;
+}
 
 static void control_connected(int connection, void *context);
 static void control_data(int connection, const uint8_t *bytes, uint32_t length,
@@ -152,6 +160,10 @@ static void stop_server(void) {
 
 static int start_server(void) {
     if (server.running) return 0;
+    if (!transfer_buffer_available()) {
+        set_status("Large-file transfers require at least 32 MB of VM RAM.");
+        return -1;
+    }
     int dir = fs_create_dir(FS_ROOT, "Transfer");
     if (dir < 0 || !fs_is_dir(dir)) {
         set_status("Could not create Transfer folder.");
@@ -832,6 +844,7 @@ static void ftp_event(Window *window, Event *event) {
         gfx_text(cx + 16, cy + 122, server.running ? "Status: Running" : "Status: Stopped",
                  server.running ? COL_GREEN : COL_RED, COL_GRAY);
         gfx_text(cx + 16, cy + 146, server.status, COL_BLACK, COL_GRAY);
+        gfx_text(cx + 16, cy + 166, "Maximum file size: 512 KiB", COL_BLACK, COL_GRAY);
         gfx_text(cx + 16, cy + 184, "Anonymous plain FTP; no encryption.", COL_RED, COL_GRAY);
         gfx_text(cx + 16, cy + 204, "Use only on VirtualBox Host-only networking.", COL_BLACK, COL_GRAY);
         gfx_button(cx + 16, cy + ch - 42, 100, 28,

@@ -129,6 +129,34 @@ static void copy_selected(int cut) {
     copy_inode(selected_file(), cut);
 }
 
+static int allocate_desktop_cell(int except_inode) {
+    int desktop = desktop_files_dir();
+    int capacity = desktop_file_capacity();
+    if (desktop < 0) return -1;
+    int items[160];
+    int item_count = fs_list((uint16_t)desktop, items, 160);
+    for (int cell = 0; cell < capacity; cell++) {
+        int occupied = 0;
+        for (int i = 0; i < item_count; i++) {
+            if (items[i] != except_inode && fs_desktop_cell(items[i]) == cell) {
+                occupied = 1;
+                break;
+            }
+        }
+        if (!occupied) return cell;
+    }
+    return -1;
+}
+
+static int ensure_desktop_cell(int inode) {
+    int desktop = desktop_files_dir();
+    if (desktop < 0 || fs_parent(inode) != (uint16_t)desktop) return 0;
+    int cell = fs_desktop_cell(inode);
+    if (cell >= 0 && cell < desktop_file_capacity()) return 0;
+    cell = allocate_desktop_cell(inode);
+    return cell < 0 ? -1 : fs_set_desktop_cell(inode, cell);
+}
+
 int app_files_move_inode(int inode, int destination) {
     if (inode <= 0 || !fs_type(inode) || destination < 0 ||
         !fs_is_dir(destination))
@@ -136,15 +164,24 @@ int app_files_move_inode(int inode, int destination) {
     int bin = fs_recycle_bin();
     if (destination == bin)
         return fs_parent(inode) == (uint16_t)bin ? 0 : fs_recycle(inode);
+    int desktop = desktop_files_dir();
+    if (destination == desktop &&
+        fs_parent(inode) != (uint16_t)desktop &&
+        allocate_desktop_cell(inode) < 0)
+        return -1;
+    int result;
     if (fs_parent(inode) == (uint16_t)bin) {
-        int result = fs_restore(inode);
+        result = fs_restore(inode);
         if (result) return result;
         result = fs_move(inode, (uint16_t)destination);
         if (result && fs_recycle(inode))
             serial_write("FILES: could not return failed move to Recycle Bin\n");
-        return result;
+    } else {
+        result = fs_move(inode, (uint16_t)destination);
     }
-    return fs_move(inode, (uint16_t)destination);
+    if (!result && destination == desktop)
+        result = ensure_desktop_cell(inode);
+    return result;
 }
 
 static void paste_item_to(uint16_t destination) {
@@ -316,7 +353,7 @@ void app_files_context_open(int inode, int x, int y) {
             context_add("Delete", FILE_ACTION_DELETE);
             if (fs_parent(inode) == (uint16_t)bin)
                 context_add("Restore", FILE_ACTION_RESTORE);
-            else if (inode != desktop_files_dir())
+            else if (fs_parent(inode) != (uint16_t)desktop_files_dir())
                 context_add("Move to Desktop", FILE_ACTION_DESKTOP);
             context_add("Cut", FILE_ACTION_CUT);
             context_add("Copy", FILE_ACTION_COPY);

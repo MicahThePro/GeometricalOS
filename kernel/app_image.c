@@ -14,7 +14,7 @@
 #define STBI_NO_LINEAR
 #include "third_party/stb/stb_image.h"
 
-#define IMAGE_INPUT_ADDRESS 0x790000u
+#define IMAGE_INPUT_ADDRESS FS_LARGE_BUFFER_ADDRESS
 #define IMAGE_PIXELS_ADDRESS 0x1700000u
 #define IMAGE_MAX_PIXELS 2100000u
 #define IMAGE_RGBA_BYTES (IMAGE_MAX_PIXELS * 4u)
@@ -43,7 +43,10 @@ static int image_memory_available(void) {
     const BootInfo *info = bootinfo();
     if (info->magic != BOOTINFO_MAGIC) return 0;
     uint64_t memory_end = 0x100000ull + (uint64_t)info->ext_mem_kb * 1024u;
-    return memory_end >= (uint64_t)IMAGE_PIXELS_ADDRESS + IMAGE_RGBA_BYTES;
+    uint64_t required_end = (uint64_t)IMAGE_PIXELS_ADDRESS + IMAGE_RGBA_BYTES;
+    uint64_t input_end = (uint64_t)IMAGE_INPUT_ADDRESS + FS_MAX_FILE_BYTES;
+    if (input_end > required_end) required_end = input_end;
+    return memory_end >= required_end;
 }
 
 static int decode_image(int inode, uint8_t **pixels, int *width, int *height) {
