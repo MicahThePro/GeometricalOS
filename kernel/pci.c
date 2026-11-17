@@ -21,6 +21,16 @@ void pci_write(int bus, int dev, int fn, int off, uint32_t val) {
     outl(0xCFC, val);
 }
 
+void pci_write16(int bus, int dev, int fn, int off, uint16_t val) {
+    uint32_t addr = 0x80000000u
+        | ((uint32_t)bus << 16)
+        | ((uint32_t)dev << 11)
+        | ((uint32_t)fn << 8)
+        | ((uint32_t)off & 0xFCu);
+    outl(0xCF8, addr);
+    outw((uint16_t)(0xCFCu + ((uint32_t)off & 2u)), val);
+}
+
 int pci_find(uint16_t vendor, uint16_t device, int *bus, int *dev, int *fn) {
     for (int b = 0; b < 8; b++) {
         for (int d = 0; d < 32; d++) {

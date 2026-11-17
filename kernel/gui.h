@@ -27,7 +27,9 @@ enum {
     ICON_HELP,
     ICON_STORAGE,
     ICON_WALLPAPER,
-    ICON_MOUSE
+    ICON_MOUSE,
+    ICON_FTP,
+    ICON_IMAGE
 };
 
 enum {
@@ -38,7 +40,8 @@ enum {
     EVT_MOVE,
     EVT_RDOWN,
     EVT_MENU,
-    EVT_TIMER
+    EVT_TIMER,
+    EVT_DROP
 };
 
 #define MENU_MAX 4
@@ -107,6 +110,7 @@ int gui_file(const char *title, int save, uint16_t *dir, char *name, int namemax
 void gui_set_launcher(void (*fn)(int fkey));
 void gui_set_start_handler(void (*fn)(void));
 void gui_set_desktop_handler(void (*draw)(void), void (*event)(Event *));
+void gui_set_drag_payload(int payload);
 void gui_focus_desktop(void);
 int gui_desktop_focused(void);
 

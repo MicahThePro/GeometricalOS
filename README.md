@@ -13,9 +13,10 @@ It is not Linux. It is a 32-bit freestanding kernel with its own bootloader, a s
 - Use the mouse and keyboard on a retro geometric desktop with a bottom taskbar.
 - Open **GeoDeck** for the Workspace, Utilities, and Arcade app groups, or click desktop shortcuts.
 - Open **File Manager, GeoFind, Recent Documents, Run, Help, Disk Space & Backup**, and the classic apps.
+- View PNG, JPG, JPEG, and WebP pictures in the Image Viewer; images up to 2.1 megapixels are supported.
 - Each app has its own small pixel-art icon, so similar utilities are easier to tell apart.
-- Cut, copy, paste, rename, and move files in File Manager; search offline by file name, type, or folder.
-- Arrange desktop shortcuts, recover deleted files, and open the startup recovery tools.
+- Cut, copy, paste, rename, and drag files between File Manager folders, the Desktop, and Recycle Bin.
+- Right-click files for common actions; recover deleted files and open the startup recovery tools.
 - Pick a geometric wallpaper, wait for the flying-shapes screensaver, and shut down or restart.
 
 ![Desktop](screenshots/04-desktop.png)
@@ -103,7 +104,7 @@ In System, Motherboard, boot order:
 - Click **GeoDeck** on the taskbar, double-click a workspace icon (**Workspace**, **Utilities**, **Arcade**), then double-click a program.
 - GeoDeck's **File** menu also offers **Run**, **GeoFind**, **Recent Documents**, and **Disk Space & Backup**. Help → Help Topics has offline guides for every app.
 - **Alt+Tab** cycles windows. **Alt+F4** closes the focused window. Choose **File → Exit GeometricalOS** in GeoDeck to shut down or restart.
-- The desktop has a single **Recycle Bin** icon in the top-left corner. Double-click it to open the bin; drag it to move it.
+- The desktop has a **Recycle Bin** icon and shows files moved into its `Desktop` folder. Double-click files or folders to open them; drag icons to rearrange them, onto folders to move them, or onto the bin to delete them.
 - **Ctrl+Esc** focuses the desktop; press Enter to open the Recycle Bin.
 - Right-click an empty desktop area for quick wallpaper choices, including the Navy-and-Amber **Orbit Grid**.
 - **Tab / Shift+Tab** moves focus between buttons. Enter or Space activates the focused button. Use **Alt+F** (or the first letter of another menu) and the arrow keys to navigate menus without a mouse.
@@ -111,6 +112,24 @@ In System, Motherboard, boot order:
 - **File → Exit GeometricalOS** asks Shutdown, Restart, or Cancel. Shutdown shows “It is now safe to turn off your computer.” Press Enter there to try powering off the computer. Restart reboots.
 - The screensaver starts after about 45 seconds with no keyboard or mouse input. Press a key or move the mouse to come back.
 - **Options → Wallpaper** switches between solid, tiles, stripes, diamonds, and Orbit Grid. The choice is saved on disk.
+
+### Transfer files with FileZilla
+
+The **FTP Server** utility shares only the `Transfer` folder with FileZilla. It uses anonymous, unencrypted FTP, so keep the VM adapter on a private **Host-only Adapter** network. Do not use Bridged networking or expose/forward FTP ports to the Internet.
+
+1. Shut down the VM. In VirtualBox **Settings → Network → Adapter 1**, enable the adapter, choose **Host-only Adapter**, and select the host-only network interface.
+2. In **Advanced → Adapter Type**, choose **PCnet-FAST III (Am79C973)**. Make sure **Cable Connected** is checked.
+3. The server uses guest address `192.168.56.2/24` and passive ports `50000-50003`. Set or confirm the Windows host-only adapter address is `192.168.56.1` with mask `255.255.255.0`. The guest does not use DHCP.
+4. Start GeometricalOS and open **GeoDeck → Utilities → FTP Server**. Leave the window running; it reports whether the PCnet card was detected.
+5. In FileZilla Client's Site Manager, use:
+   - Protocol: **FTP - File Transfer Protocol**
+   - Host: `192.168.56.2`; Port: `21`
+   - Encryption: **Only use plain FTP (insecure)**
+   - Logon type: **Anonymous**
+   - Transfer Settings: **Passive**
+6. Connect. The server's `/` is the GeometricalOS `Transfer` folder. Use File Manager to put files there before connecting, or drag files in FileZilla to upload them. The File Manager refreshes an open folder every second; drag transferred files onto the Desktop to move them out of `Transfer`. FileZilla cannot receive directory-change notifications over FTP, so press F5 in its remote pane to see files added from GeometricalOS. Downloads are limited to files in `Transfer`. Individual files are limited to 512 KiB by GeoFS; FTP requires a VM with at least 32 MB of RAM.
+
+Plain FTP does not encrypt files or credentials. Use this only on the private Host-only link and stop the server when finished. The minimal PCnet/IP/TCP implementation is intended for this VirtualBox adapter and does not provide DHCP, Internet routing, TLS, or active FTP.
 
 ### Keyboard shortcuts
 
@@ -139,23 +158,25 @@ In System, Motherboard, boot order:
 
 - **Notepad** — File → New, Open, Save, and Save As. The dialog lists folders and files, has a file-name box, and OK / Cancel. Closing a changed document asks whether to save. Files stay on the GeoFS disk across reboots. Open `.TXT` from File Manager.
 - **Write** — a simple word processor with bold, italic, underline, and paragraph alignment. Save and reopen its own `.WRI` format; Ctrl+B/I/U toggle styles, Ctrl+S saves, and Ctrl+V inserts the character selected in Character Map.
+- **Image Viewer** — opens `.PNG`, `.JPG`, `.JPEG`, and `.WEBP` images from File Manager or its File → Open menu, and fits the picture to the window. It needs at least 32 MB of VM memory; images are limited to 2.1 megapixels and GeoFS's 512 KiB file-size limit.
 - **Character Map** — browse the printable ASCII characters with the keyboard or mouse, then Copy and paste the selection into Write with Ctrl+V.
 - **Cardfile** — create titled note cards, edit them with the keyboard, and save/open them as `.CRD` files.
 - **Calculator** — mouse or keyboard. `+ - * /`, decimal point, backspace, and C.
 - **Clock** — analog and digital local time. Set the date, time, and fixed UTC offset in Control Panel → Date/Time; the offset is saved in `SETTINGS.CFG` and the date/time are written to the hardware RTC. The RTC is treated as UTC, and daylight-saving transitions are not automatic. A working battery-backed RTC is required to keep time while powered off.
 - **Paint** — Pen, Line, Box, Fill, Clear, and 16 colors. Keys: P, L, B, F, C. File → Save writes a `.GIM` picture. File Manager opens those in Paint. Unsaved changes are asked about on close.
 - **Minesweeper** — beginner 9×9 grid, 10 mines. Left click opens, right click flags. The first click is never a mine. Click the face to start over.
-- **File Manager** — folders and files. Use Edit → Cut/Copy/Paste to move or duplicate items; F2 or File → Rename changes a name. Delete moves items to the Recycle Bin. Open `.TXT` in Notepad, `.WRI` in Write, `.CRD` in Cardfile, and `.GIM` pictures in Paint.
+- **File Manager** — drag items onto folders to move them, onto the Desktop to put them there, or onto the Recycle Bin to delete them. Rearrange desktop icons by dragging them to an empty spot or onto another icon to swap places. Right-click for Open, Rename, Delete, Cut, Copy, and Paste Here; Edit → Cut/Copy/Paste and F2 are also available. Open `.TXT` in Notepad, `.WRI` in Write, `.CRD` in Cardfile, and `.GIM` pictures in Paint.
 - **GeoFind** — search files by name, extension/type, or containing folder, then open supported documents from the result list.
 - **Recent Documents** — reopen the ten most recently opened text, Write, Paint, and Cardfile documents. Recycled, missing, or renamed entries are ignored.
 - **Run** — launch an app by name or open a supported document by its exact file name.
 - **Help** — offline guides for each app, keyboard shortcuts, and common fixes.
-- **Disk Space & Backup** — view GeoFS used/free space and create or restore a `Backups\Latest` snapshot. This snapshot is stored on the same virtual disk, so it does not protect against disk loss. In the browser version, use **Download backup** to save a portable copy outside the virtual disk.
-- **Recycle Bin** — restore selected items to their original folders or empty the bin to permanently free their disk space. Restoring is refused if the original name is already in use.
+- **Disk Space & Backup** — view the detected disk's total capacity, boot/system image, GeoFS metadata and files, reserved space, and free GeoFS capacity. Create or restore a `Backups\Latest` snapshot; it is stored on the same virtual disk, so keep another copy elsewhere to protect against disk loss. In the browser version, use **Download backup** for a portable raw-disk copy.
+- **Recycle Bin** — right-click items to restore, rename, or permanently delete them; drag items into the bin to recycle them. Restoring is refused if the original name is already in use.
 - **Terminal** — type `help`. Commands: `dir` or `ls`, `cd`, `type` or `cat`, `echo`, `cls`, `mkdir`, `del` (moves to Recycle Bin), `ver`, `date`, `time`, `shutdown`, and `restart`.
 - **Control Panel** — color scheme, desktop pattern, screensaver, mouse speed and buttons, date/time and fixed UTC offset, sound (full volume by default), and settings recovery. Display, mouse, sound, clock, wallpaper, and icon-position settings are stored together in `SETTINGS.CFG`; the previous saved settings are kept in `SETTINGS.BAK`.
 - **System Information and Recovery** — show BIOS/video/disk details, restore the last saved settings, or reset settings to defaults. Press F8 during startup for Safe Mode, diagnostics, and settings recovery.
 - **Media Player** — Play, Pause, and Stop for five short built-in tunes, with a position bar. Sound Blaster 16 plays them when that card is selected; otherwise the PC speaker does.
+- **FTP Server** — transfer files with FileZilla over a VirtualBox Host-only network. Anonymous plain FTP is restricted to the `Transfer` folder; use it only on a private network.
 - **Solitaire** — Klondike, one card at a time. Click the deck to draw. Click a card, then a pile, to move it. Double-click a card to file it on a foundation when the rules allow. Press N for a new game.
 - **Snake** — steer with the arrow keys or WASD, eat the apples to grow, and avoid the walls and your tail. Press Space to pause or N to start a new game.
 

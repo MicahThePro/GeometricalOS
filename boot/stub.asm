@@ -893,6 +893,22 @@ fill_bootinfo:
     mov [es:di + 48], eax
     push es
     push di
+    mov ax, 0xE801
+    int 0x15
+    jc .fallback_extended_memory
+    test ax, ax
+    jnz .e801_memory_ready
+    test bx, bx
+    jnz .e801_memory_ready
+    mov ax, cx
+    mov bx, dx
+.e801_memory_ready:
+    movzx eax, ax
+    movzx edx, bx
+    shl edx, 6
+    add eax, edx
+    jmp .store_extended_memory
+.fallback_extended_memory:
     mov ah, 0x88
     int 0x15
     jc .no_extended_memory

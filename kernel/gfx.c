@@ -529,6 +529,43 @@ void gfx_blit_indexed(int dx, int dy, const uint8_t *src, int bw, int bh,
     mark_dirty(dx, dy, bw, bh);
 }
 
+void gfx_blit_rgba_scaled(int dx, int dy, const uint8_t *src, int src_w,
+                          int src_h, int dst_w, int dst_h) {
+    if (!src || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0)
+        return;
+    int x0 = dx < clip_x0 ? clip_x0 : dx;
+    int y0 = dy < clip_y0 ? clip_y0 : dy;
+    int x1 = dx + dst_w;
+    int y1 = dy + dst_h;
+    if (x1 > clip_x1) x1 = clip_x1;
+    if (y1 > clip_y1) y1 = clip_y1;
+    if (x0 >= x1 || y0 >= y1) return;
+
+    uint64_t x_step = ((uint64_t)(uint32_t)src_w << 16) / (uint32_t)dst_w;
+    uint64_t y_step = ((uint64_t)(uint32_t)src_h << 16) / (uint32_t)dst_h;
+    for (int y = y0; y < y1; y++) {
+        uint32_t sy = (uint32_t)(((uint64_t)(uint32_t)(y - dy) * y_step) >> 16);
+        uint32_t *row = back + (uint32_t)y * (uint32_t)sw;
+        const uint8_t *source = src + (size_t)sy * (size_t)src_w * 4u;
+        for (int x = x0; x < x1; x++) {
+            uint32_t sx = (uint32_t)(((uint64_t)(uint32_t)(x - dx) * x_step) >> 16);
+            const uint8_t *pixel = source + (size_t)sx * 4u;
+            uint32_t alpha = pixel[3];
+            if (alpha == 0) continue;
+            uint32_t inverse = 255u - alpha;
+            uint32_t background = row[x];
+            uint32_t red = (pixel[0] * alpha +
+                            ((background >> 16) & 0xFFu) * inverse + 127u) / 255u;
+            uint32_t green = (pixel[1] * alpha +
+                              ((background >> 8) & 0xFFu) * inverse + 127u) / 255u;
+            uint32_t blue = (pixel[2] * alpha +
+                             (background & 0xFFu) * inverse + 127u) / 255u;
+            row[x] = (red << 16) | (green << 8) | blue;
+        }
+    }
+    mark_dirty(x0, y0, x1 - x0, y1 - y0);
+}
+
 void gfx_logo(int cx, int cy, int scale) {
     if (scale < 1) scale = 1;
     int s = 28 * scale;

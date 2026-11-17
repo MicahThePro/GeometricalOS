@@ -1,5 +1,6 @@
 #include "fs.h"
 #include "ata.h"
+#include "bootinfo.h"
 #include "io.h"
 #include "serial.h"
 
@@ -11,7 +12,6 @@
 #define DATA_LBA         (FS_LBA + DATA_OFF)
 #define BITMAP_LBA       (FS_LBA + 1u)
 #define INODE_LBA        (FS_LBA + 1u + BITMAP_SECTORS)
-#define MAX_FILE_BYTES   (280u * 512u)
 
 typedef struct __attribute__((packed)) {
     char magic[8];
@@ -38,8 +38,15 @@ _Static_assert(sizeof(Super) <= 512, "GeoFS superblock must fit in one sector");
 static Super *super = (Super *)0x640000;
 static Inode *inodes = (Inode *)0x641000;
 static uint8_t *bitmap = (uint8_t *)0x650000;
-static uint8_t copy_buffer[MAX_FILE_BYTES];
+static uint8_t *copy_buffer = (uint8_t *)FS_LARGE_BUFFER_ADDRESS;
 static int mounted;
+
+static int copy_buffer_available(void) {
+    const BootInfo *info = bootinfo();
+    uint64_t memory_end = 0x100000ull + (uint64_t)info->ext_mem_kb * 1024u;
+    return info->magic == BOOTINFO_MAGIC &&
+           memory_end >= (uint64_t)FS_LARGE_BUFFER_ADDRESS + FS_MAX_FILE_BYTES;
+}
 
 static int bit_get(uint32_t i) {
     return (bitmap[i >> 3] >> (i & 7)) & 1;
@@ -165,9 +172,10 @@ int fs_create_dir(uint16_t parent, const char *name) {
 
 int fs_write(uint16_t parent, const char *name, const void *data, uint32_t size) {
     if (!mounted || !valid_name(name)) return -1;
-    if (size > MAX_FILE_BYTES) return -2;
+    if (size > FS_MAX_FILE_BYTES) return -2;
     int idx = fs_lookup(parent, name);
     if (idx >= 0 && inodes[idx].type != 1) return -3;
+    int newly_created = 0;
     if (idx < 0) {
         idx = alloc_inode();
         if (idx < 0) return -4;
@@ -175,6 +183,7 @@ int fs_write(uint16_t parent, const char *name, const void *data, uint32_t size)
         strncpy(inodes[idx].name, name, 28);
         inodes[idx].type = 1;
         inodes[idx].parent = parent;
+        newly_created = 1;
     }
     Inode *ino = &inodes[idx];
     if (ino->blocks) {
@@ -185,7 +194,13 @@ int fs_write(uint16_t parent, const char *name, const void *data, uint32_t size)
     uint32_t blocks = (size + 511u) / 512u;
     uint32_t lba = 0;
     if (blocks) {
-        if (alloc_run(blocks, &lba)) return -5;
+        if (alloc_run(blocks, &lba)) {
+            if (newly_created) {
+                memset(ino, 0, sizeof(*ino));
+                fs_sync();
+            }
+            return -5;
+        }
         const uint8_t *src = data;
         uint32_t full_blocks = size / 512u;
         uint16_t batch[16 * 256];
@@ -193,7 +208,14 @@ int fs_write(uint16_t parent, const char *name, const void *data, uint32_t size)
             uint32_t count = full_blocks - s;
             if (count > 16) count = 16;
             memcpy(batch, src + s * 512u, count * 512u);
-            if (ata_write(lba + s, batch, count)) return -6;
+            if (ata_write(lba + s, batch, count)) {
+                free_run(lba, blocks);
+                if (newly_created) {
+                    memset(ino, 0, sizeof(*ino));
+                    fs_sync();
+                }
+                return -6;
+            }
             s += count;
         }
         if (size & 511u) {
@@ -202,7 +224,14 @@ int fs_write(uint16_t parent, const char *name, const void *data, uint32_t size)
             uint32_t chunk = size - off;
             memset(sec, 0, sizeof(sec));
             memcpy(sec, src + off, chunk);
-            if (ata_write(lba + full_blocks, sec, 1)) return -6;
+            if (ata_write(lba + full_blocks, sec, 1)) {
+                free_run(lba, blocks);
+                if (newly_created) {
+                    memset(ino, 0, sizeof(*ino));
+                    fs_sync();
+                }
+                return -6;
+            }
         }
     }
     ino->start_lba = lba;
@@ -364,9 +393,31 @@ int fs_move(int inode, uint16_t parent) {
     return 0;
 }
 
+int fs_desktop_cell(int inode) {
+    if (!mounted || inode <= 0 || inode >= INODE_COUNT ||
+        !inodes[inode].type || inodes[inode].unused[1] == 0)
+        return -1;
+    return (int)inodes[inode].unused[1] - 1;
+}
+
+int fs_set_desktop_cell(int inode, int cell) {
+    if (!mounted || inode <= 0 || inode >= INODE_COUNT ||
+        !inodes[inode].type || cell < -1)
+        return -1;
+    uint32_t old_cell = inodes[inode].unused[1];
+    inodes[inode].unused[1] = cell < 0 ? 0u : (uint32_t)cell + 1u;
+    if (fs_sync()) {
+        inodes[inode].unused[1] = old_cell;
+        fs_sync();
+        return -1;
+    }
+    return 0;
+}
+
 static int copy_file_as(int source, uint16_t parent, const char *name) {
     uint32_t size = fs_size(source), read_size = 0;
-    if (fs_read(source, copy_buffer, MAX_FILE_BYTES, &read_size) ||
+    if (!copy_buffer_available() ||
+        fs_read(source, copy_buffer, FS_MAX_FILE_BYTES, &read_size) ||
         read_size != size)
         return -1;
     int copied = fs_write(parent, name, copy_buffer, size);
@@ -434,6 +485,7 @@ int fs_restore_tree(int source_dir, uint16_t dest_dir) {
         inodes[source_dir].type != 2 || dest_dir >= INODE_COUNT ||
         inodes[dest_dir].type != 2)
         return -1;
+    if (!copy_buffer_available()) return -1;
     if (source_dir == dest_dir ||
         inside_directory(dest_dir, (uint16_t)source_dir))
         return -6;
@@ -466,7 +518,7 @@ int fs_restore_tree(int source_dir, uint16_t dest_dir) {
             } else {
                 if (existing >= 0 && fs_is_dir(existing)) return -2;
                 uint32_t size = fs_size(child), read_size = 0;
-                if (fs_read(child, copy_buffer, MAX_FILE_BYTES, &read_size) ||
+                if (fs_read(child, copy_buffer, FS_MAX_FILE_BYTES, &read_size) ||
                     read_size != size ||
                     fs_write(target, fs_name(child), copy_buffer, size) < 0)
                     return -5;
@@ -476,13 +528,16 @@ int fs_restore_tree(int source_dir, uint16_t dest_dir) {
     return 0;
 }
 
-int fs_get_space(uint32_t *total_bytes, uint32_t *used_bytes) {
-    if (!mounted || !total_bytes || !used_bytes) return -1;
+int fs_get_space(FsSpaceInfo *info) {
+    if (!mounted || !info) return -1;
     uint32_t used = 0;
     for (uint32_t i = 0; i < super->data_blocks; i++)
         if (bit_get(i)) used++;
-    *total_bytes = super->data_blocks * 512u;
-    *used_bytes = used * 512u;
+    info->disk_sectors = super->total_sectors;
+    info->start_sector = FS_LBA;
+    info->metadata_sectors = DATA_OFF;
+    info->data_blocks = super->data_blocks;
+    info->used_blocks = used;
     return 0;
 }
 
