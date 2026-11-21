@@ -4,6 +4,18 @@
 
 #define ATA_IO 0x1F0
 #define ATA_CTRL 0x3F6
+#define RAMDISK_SECTORS 16384u
+
+static uint8_t *ramdisk;
+static int ramdisk_on;
+
+int ata_ramdisk_begin(void) {
+    ramdisk = (uint8_t *)0x2800000;
+    memset(ramdisk, 0, RAMDISK_SECTORS * 512u);
+    ramdisk_on = 1;
+    serial_write("ATA: memory disk\n");
+    return 0;
+}
 
 static int wait_not_busy(void) {
     for (int i = 0; i < 2000000; i++) {
@@ -46,6 +58,12 @@ static void trim_model(char *s) {
 
 int ata_probe(AtaDisk *disk) {
     memset(disk, 0, sizeof(*disk));
+    if (ramdisk_on) {
+        memcpy(disk->model, "Memory disk", 12);
+        disk->sectors = RAMDISK_SECTORS;
+        disk->present = 1;
+        return 0;
+    }
     uint8_t st = inb(ATA_IO + 7);
     if (st == 0xFF) {
         serial_write("ATA: no primary controller\n");
@@ -96,6 +114,11 @@ int ata_probe(AtaDisk *disk) {
 }
 
 int ata_read(uint32_t lba, void *buf, uint32_t count) {
+    if (ramdisk_on) {
+        if (lba + count < lba || lba + count > RAMDISK_SECTORS) return -1;
+        memcpy(buf, ramdisk + lba * 512u, count * 512u);
+        return 0;
+    }
     uint8_t *out = buf;
     while (count) {
         uint32_t n = count > 16 ? 16 : count;
@@ -120,6 +143,11 @@ int ata_read(uint32_t lba, void *buf, uint32_t count) {
 }
 
 int ata_write(uint32_t lba, const void *buf, uint32_t count) {
+    if (ramdisk_on) {
+        if (lba + count < lba || lba + count > RAMDISK_SECTORS) return -1;
+        memcpy((void *)(ramdisk + lba * 512u), buf, count * 512u);
+        return 0;
+    }
     const uint8_t *in = buf;
     while (count) {
         uint32_t n = count > 16 ? 16 : count;
@@ -146,6 +174,7 @@ int ata_write(uint32_t lba, const void *buf, uint32_t count) {
 }
 
 int ata_flush(void) {
+    if (ramdisk_on) return 0;
     if (wait_not_busy()) return -1;
     outb(ATA_IO + 6, 0xE0);
     inb(ATA_CTRL);

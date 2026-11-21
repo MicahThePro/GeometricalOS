@@ -1,0 +1,477 @@
+/* 64-bit UEFI loader. Rufus copies this file to \EFI\BOOT\BOOTX64.EFI
+ * on a FAT32 stick of any size, including 64 GB. The kernel image is inside
+ * this file, so the stick does not need the CD boot catalog.
+ */
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int uint32_t;
+typedef unsigned long long uint64_t;
+typedef uint64_t uintn;
+typedef uint64_t efi_status;
+typedef void *efi_handle;
+
+#define EFI_SUCCESS 0
+#define EFI_BUFFER_TOO_SMALL 0x8000000000000005ULL
+
+typedef struct {
+    uint64_t signature;
+    uint32_t revision;
+    uint32_t header_size;
+    uint32_t crc32;
+    uint32_t reserved;
+} EfiTableHeader;
+
+struct EfiSimpleTextOutput;
+typedef struct EfiSimpleTextOutput {
+    void *reset;
+    efi_status (*output_string)(struct EfiSimpleTextOutput *self, uint16_t *text);
+} EfiSimpleTextOutput;
+
+typedef struct {
+    EfiTableHeader hdr;
+    uint16_t *firmware_vendor;
+    uint32_t firmware_revision;
+    uint32_t pad0;
+    efi_handle console_in_handle;
+    void *con_in;
+    efi_handle console_out_handle;
+    EfiSimpleTextOutput *con_out;
+    efi_handle stderr_handle;
+    void *std_err;
+    void *runtime;
+    void *boot;
+    uintn entries;
+    void *config;
+} EfiSystemTable;
+
+typedef struct {
+    EfiTableHeader hdr;
+    void *raise_tpl;
+    void *restore_tpl;
+    void *allocate_pages;
+    void *free_pages;
+    efi_status (*get_memory_map)(uintn *size, void *map, uintn *key, uintn *desc_size, uint32_t *desc_ver);
+    void *allocate_pool;
+    void *free_pool;
+    void *create_event;
+    void *set_timer;
+    void *wait_for_event;
+    void *signal_event;
+    void *close_event;
+    void *check_event;
+    void *install_protocol;
+    void *reinstall_protocol;
+    void *uninstall_protocol;
+    void *handle_protocol;
+    void *reserved;
+    void *register_notify;
+    void *locate_handle;
+    void *locate_device_path;
+    void *install_config;
+    void *load_image;
+    void *start_image;
+    void *exit;
+    void *unload_image;
+    efi_status (*exit_boot_services)(efi_handle image, uintn key);
+    void *next_monotonic;
+    efi_status (*stall)(uintn microseconds);
+    efi_status (*set_watchdog)(uintn timeout, uint64_t code, uintn data_size, uint16_t *data);
+    void *connect;
+    void *disconnect;
+    void *open_protocol;
+    void *close_protocol;
+    void *open_protocol_info;
+    void *protocols_per_handle;
+    void *locate_handle_buffer;
+    efi_status (*locate_protocol)(uint8_t *guid, void *reg, void **iface);
+} EfiBootServices;
+
+typedef struct {
+    uint32_t red, green, blue, reserved;
+} EfiPixelMask;
+
+typedef struct {
+    uint32_t version;
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    EfiPixelMask mask;
+    uint32_t stride;
+} EfiGopInfo;
+
+typedef struct {
+    uint32_t max_mode;
+    uint32_t mode;
+    EfiGopInfo *info;
+    uintn size_of_info;
+    uint64_t framebuffer;
+    uintn framebuffer_size;
+} EfiGopMode;
+
+typedef struct EfiGop {
+    efi_status (*query_mode)(struct EfiGop *self, uint32_t mode, uintn *size, EfiGopInfo **info);
+    efi_status (*set_mode)(struct EfiGop *self, uint32_t mode);
+    void *blt;
+    EfiGopMode *mode;
+} EfiGop;
+
+typedef struct {
+    uint32_t type;
+    uint32_t pad;
+    uint64_t physical;
+    uint64_t virtual;
+    uint64_t pages;
+    uint64_t attribute;
+} EfiMemDesc;
+
+typedef char conout_ok[(__builtin_offsetof(EfiSystemTable, con_out) == 0x40) ? 1 : -1];
+typedef char boot_ok[(__builtin_offsetof(EfiSystemTable, boot) == 0x60) ? 1 : -1];
+typedef char locate_ok[(__builtin_offsetof(EfiBootServices, locate_protocol) == 0x140) ? 1 : -1];
+typedef char exit_ok[(__builtin_offsetof(EfiBootServices, exit_boot_services) == 0xE8) ? 1 : -1];
+
+static uint8_t gop_guid[16] = {
+    0xDE, 0xA9, 0x42, 0x90, 0xDC, 0x23, 0x38, 0x4A,
+    0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A
+};
+
+extern char _binary_bootimg_bin_start[];
+extern char _binary_bootimg_bin_end[];
+extern char _binary_switch64_bin_start[];
+extern char _binary_switch64_bin_end[];
+extern char _binary_enter32_bin_start[];
+extern char _binary_enter32_bin_end[];
+extern void efi_jump_low(uint64_t cr3);
+
+static void *memcpy(void *dst, const void *src, uint64_t n) {
+    uint8_t *d = dst;
+    const uint8_t *s = src;
+    for (uint64_t i = 0; i < n; i++) d[i] = s[i];
+    return dst;
+}
+
+static void *memset(void *dst, int c, uint64_t n) {
+    uint8_t *d = dst;
+    for (uint64_t i = 0; i < n; i++) d[i] = (uint8_t)c;
+    return dst;
+}
+
+static void outb(uint16_t port, uint8_t val) {
+    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+static uint8_t inb(uint16_t port) {
+    uint8_t v;
+    __asm__ volatile ("inb %1, %0" : "=a"(v) : "Nd"(port));
+    return v;
+}
+static void outl(uint16_t port, uint32_t val) {
+    __asm__ volatile ("outl %0, %1" : : "a"(val), "Nd"(port));
+}
+static uint32_t inl(uint16_t port) {
+    uint32_t v;
+    __asm__ volatile ("inl %1, %0" : "=a"(v) : "Nd"(port));
+    return v;
+}
+
+static void serial_init(void) {
+    outb(0x3F8 + 3, 0x80);
+    outb(0x3F8, 1);
+    outb(0x3F8 + 1, 0);
+    outb(0x3F8 + 3, 0x03);
+    outb(0x3F8 + 2, 0xC7);
+}
+static void sput(char c) {
+    for (int i = 0; i < 100000; i++) {
+        if (inb(0x3F8 + 5) & 0x20) break;
+    }
+    outb(0x3F8, (uint8_t)c);
+}
+static void sputs(const char *s) {
+    while (*s) sput(*s++);
+}
+
+static uint32_t pci_read(int bus, int dev, int fn, int off) {
+    uint32_t addr = 0x80000000u | ((uint32_t)bus << 16) | ((uint32_t)dev << 11) |
+                    ((uint32_t)fn << 8) | ((uint32_t)off & 0xFCu);
+    outl(0xCF8, addr);
+    return inl(0xCFC);
+}
+
+static int find_xhci(int *bus, int *dev, int *fn, uint64_t *bar, uint32_t *size) {
+    for (int b = 0; b < 256; b++) {
+        for (int d = 0; d < 32; d++) {
+            for (int f = 0; f < 8; f++) {
+                uint32_t id = pci_read(b, d, f, 0);
+                if (id == 0xFFFFFFFFu || id == 0) {
+                    if (f == 0) break;
+                    continue;
+                }
+                uint32_t class = pci_read(b, d, f, 8);
+                uint8_t base = (uint8_t)(class >> 24);
+                uint8_t sub = (uint8_t)(class >> 16);
+                uint8_t prog = (uint8_t)(class >> 8);
+                if (base == 0x0C && sub == 0x03 && prog == 0x30) {
+                    uint32_t lo = pci_read(b, d, f, 0x10);
+                    uint32_t hi = 0;
+                    if ((lo & 0x7u) == 0x4u) hi = pci_read(b, d, f, 0x14);
+                    if ((lo & 1u) == 0) {
+                        *bus = b;
+                        *dev = d;
+                        *fn = f;
+                        *bar = ((uint64_t)hi << 32) | (lo & ~0xFu);
+                        *size = 0x20000;
+                        return 1;
+                    }
+                }
+                if (f == 0 && !(pci_read(b, d, 0, 0x0C) & 0x00800000u)) break;
+            }
+        }
+    }
+    return 0;
+}
+
+static uint64_t *pd[4];
+
+static void build_pages(void) {
+    uint64_t *pml4 = (uint64_t *)0x1800000;
+    uint64_t *pdpt = (uint64_t *)0x1801000;
+    memset(pml4, 0, 4096);
+    memset(pdpt, 0, 4096);
+    pml4[0] = 0x1801000ULL | 3ULL;
+    for (int i = 0; i < 4; i++) {
+        pd[i] = (uint64_t *)(0x1802000ULL + (uint64_t)i * 4096ULL);
+        memset(pd[i], 0, 4096);
+        pdpt[i] = (0x1802000ULL + (uint64_t)i * 4096ULL) | 3ULL;
+        for (int j = 0; j < 512; j++) {
+            uint64_t phys = (((uint64_t)i * 512ULL + (uint64_t)j) << 21);
+            pd[i][j] = phys | 0x83ULL;
+        }
+    }
+    /* USB rings and DMA buffers. Uncached so the controller sees writes. */
+    pd[0][8] = (8ULL << 21) | 0x83ULL | 0x18ULL;
+}
+
+static uint32_t map_device(uint64_t phys, uint32_t bytes, uint32_t window) {
+    if (!phys || !bytes) return 0;
+    if (bytes > 16u * 1024u * 1024u) bytes = 16u * 1024u * 1024u;
+    if (phys < 0x100000000ULL) {
+        uint64_t end = phys + bytes;
+        for (uint64_t a = phys & ~0x1FFFFFULL; a < end; a += 0x200000ULL) {
+            if (a < 0x2000000ULL) continue;
+            uint32_t gi = (uint32_t)((a >> 30) & 3ULL);
+            uint32_t idx = (uint32_t)((a >> 21) & 0x1FFULL);
+            pd[gi][idx] = a | 0x83ULL | 0x18ULL;
+        }
+        return (uint32_t)phys;
+    }
+    uint64_t base = phys & ~0x1FFFFFULL;
+    uint32_t off = (uint32_t)(phys - base);
+    uint32_t pages = (uint32_t)((bytes + off + 0x1FFFFFu) >> 21);
+    uint32_t idx = (window >> 21) & 0x1FF;
+    for (uint32_t i = 0; i < pages && idx + i < 512; i++)
+        pd[3][idx + i] = (base + ((uint64_t)i << 21)) | 0x83ULL | 0x18ULL;
+    return window + off;
+}
+
+static int mask_pos(uint32_t m) {
+    int p = 0;
+    if (!m) return 0;
+    while ((m & 1u) == 0) { m >>= 1; p++; }
+    return p;
+}
+static int mask_size(uint32_t m) {
+    int n = 0;
+    if (!m) return 0;
+    while ((m & 1u) == 0) m >>= 1;
+    while (m & 1u) { n++; m >>= 1; }
+    return n;
+}
+
+static int mode_score(uint32_t w, uint32_t h) {
+    if (w < 640 || h < 480) return -1;
+    if ((uint64_t)w * h * 4u > 12u * 1024u * 1024u) return -1;
+    if (w == 1024 && h == 768) return 5000;
+    if (w == 1280 && h == 800) return 4900;
+    if (w == 1280 && h == 720) return 4800;
+    if (w == 1920 && h == 1080) return 4700;
+    if (w == 800 && h == 600) return 4600;
+    int score = 1000;
+    if (w >= 1024 && h >= 768) score += 200;
+    return score - (int)(w > 1920 ? w - 1920 : 1920 - w) / 8;
+}
+
+static void say(EfiSystemTable *st, const char *s) {
+    uint16_t buf[96];
+    int i = 0;
+    while (s[i] && i < 94) {
+        buf[i] = (uint16_t)(uint8_t)s[i];
+        i++;
+    }
+    buf[i] = 0;
+    if (st && st->con_out && st->con_out->output_string)
+        st->con_out->output_string(st->con_out, buf);
+    sputs(s);
+}
+
+static uint8_t mapbuf[48 * 1024];
+
+efi_status efi_main(efi_handle image, EfiSystemTable *st) {
+    serial_init();
+    sputs("\nEFI: GeometricalOS\n");
+    EfiBootServices *bs = st->boot;
+    if (bs->set_watchdog) bs->set_watchdog(0, 0, 0, 0);
+
+    EfiGop *gop = 0;
+    efi_status stt = bs->locate_protocol(gop_guid, 0, (void **)&gop);
+    if (stt || !gop || !gop->mode) {
+        say(st, "GeometricalOS: no graphics console.\r\n");
+        return 1;
+    }
+
+    int best = -1;
+    int best_score = -1;
+    uint32_t best_w = 0, best_h = 0, best_stride = 0;
+    EfiPixelMask best_mask;
+    memset(&best_mask, 0, sizeof(best_mask));
+    uint32_t modes = gop->mode->max_mode;
+    if (modes > 128) modes = 128;
+    for (uint32_t i = 0; i < modes; i++) {
+        uintn sz = 0;
+        EfiGopInfo *info_ptr = 0;
+        if (gop->query_mode(gop, i, &sz, &info_ptr) || !info_ptr) continue;
+        if (info_ptr->format > 2) continue;
+        int score = mode_score(info_ptr->width, info_ptr->height);
+        if (score > best_score) {
+            best_score = score;
+            best = (int)i;
+            best_w = info_ptr->width;
+            best_h = info_ptr->height;
+            best_stride = info_ptr->stride;
+            best_mask = info_ptr->mask;
+        }
+    }
+    if (best < 0) {
+        say(st, "GeometricalOS: no usable screen mode.\r\n");
+        return 2;
+    }
+    if (gop->set_mode(gop, (uint32_t)best)) {
+        say(st, "GeometricalOS: could not set the screen mode.\r\n");
+        return 3;
+    }
+    EfiGopMode *gm = gop->mode;
+    if (!gm || !gm->framebuffer || !gm->info) {
+        say(st, "GeometricalOS: the display has no framebuffer.\r\n");
+        return 4;
+    }
+    uint32_t width = gm->info->width ? gm->info->width : best_w;
+    uint32_t height = gm->info->height ? gm->info->height : best_h;
+    uint32_t format = gm->info->format;
+    uint32_t stride = gm->info->stride ? gm->info->stride : best_stride;
+    EfiPixelMask mask = gm->info->mask.red || format != 2 ? gm->info->mask : best_mask;
+    uint64_t fb = gm->framebuffer;
+    uint32_t fb_bytes = (uint32_t)gm->framebuffer_size;
+    if (!fb_bytes) fb_bytes = stride * height * 4;
+
+    int xbus = 0, xdev = 0, xfn = 0;
+    uint64_t xbar = 0;
+    uint32_t xsize = 0;
+    int have_xhci = find_xhci(&xbus, &xdev, &xfn, &xbar, &xsize);
+
+    uintn map_size = sizeof(mapbuf);
+    uintn map_key = 0, desc_size = 0;
+    uint32_t desc_ver = 0;
+    stt = bs->get_memory_map(&map_size, mapbuf, &map_key, &desc_size, &desc_ver);
+    if (stt) {
+        say(st, "GeometricalOS: memory map failed.\r\n");
+        return 5;
+    }
+    uint64_t mem_bytes = 0;
+    if (desc_size) {
+        for (uintn off = 0; off + sizeof(EfiMemDesc) <= map_size; off += desc_size) {
+            EfiMemDesc *d = (EfiMemDesc *)(mapbuf + off);
+            int usable = d->type == 1 || d->type == 2 || d->type == 3 || d->type == 4 || d->type == 7;
+            if (!usable || d->physical < 0x100000ULL) continue;
+            uint64_t end = d->physical + d->pages * 4096ULL;
+            if (d->physical >= 0x100000000ULL) continue;
+            if (end > 0x100000000ULL) end = 0x100000000ULL;
+            mem_bytes += end - d->physical;
+        }
+    }
+    uint32_t ext_kb = (uint32_t)(mem_bytes / 1024ULL);
+    if (ext_kb < 65536) ext_kb = 65536;
+
+    sputs("EFI: exit boot services\n");
+    stt = bs->exit_boot_services(image, map_key);
+    if (stt) {
+        map_size = sizeof(mapbuf);
+        stt = bs->get_memory_map(&map_size, mapbuf, &map_key, &desc_size, &desc_ver);
+        if (stt) return 6;
+        stt = bs->exit_boot_services(image, map_key);
+        if (stt) return 7;
+    }
+
+    uint64_t image_bytes = (uint64_t)(_binary_bootimg_bin_end - _binary_bootimg_bin_start);
+    if (image_bytes < 8192 || image_bytes > 0x5F000) {
+        sputs("EFI: bad kernel image\n");
+        for (;;) __asm__ volatile ("hlt");
+    }
+    memcpy((void *)0x10000, _binary_bootimg_bin_start, image_bytes);
+
+    build_pages();
+    uint32_t lfb = map_device(fb, fb_bytes, 0xE0000000u);
+    uint32_t xhci = 0;
+    if (have_xhci) xhci = map_device(xbar, xsize ? xsize : 0x20000u, 0xF0000000u);
+
+    uint32_t red_pos, red_sz, green_pos, green_sz, blue_pos, blue_sz;
+    if (format == 0) {
+        red_pos = 0; red_sz = 8; green_pos = 8; green_sz = 8; blue_pos = 16; blue_sz = 8;
+    } else if (format == 1) {
+        blue_pos = 0; blue_sz = 8; green_pos = 8; green_sz = 8; red_pos = 16; red_sz = 8;
+    } else {
+        red_pos = (uint32_t)mask_pos(mask.red);
+        red_sz = (uint32_t)mask_size(mask.red);
+        green_pos = (uint32_t)mask_pos(mask.green);
+        green_sz = (uint32_t)mask_size(mask.green);
+        blue_pos = (uint32_t)mask_pos(mask.blue);
+        blue_sz = (uint32_t)mask_size(mask.blue);
+    }
+
+    uint32_t *info = (uint32_t *)0x6000;
+    memset(info, 0, 256);
+    info[0] = 0xB007DA7Au;
+    info[1] = 0;
+    info[2] = width;
+    info[3] = height;
+    info[4] = stride * 4u;
+    info[5] = 32;
+    info[6] = lfb;
+    info[7] = red_sz;
+    info[8] = red_pos;
+    info[9] = green_sz;
+    info[10] = green_pos;
+    info[11] = blue_sz;
+    info[12] = blue_pos;
+    info[13] = ext_kb;
+    info[14] = 0;
+    info[15] = 0;
+    info[16] = 0;
+    info[17] = xhci;
+    info[18] = have_xhci ? (0x80000000u | ((uint32_t)xbus << 16) | ((uint32_t)xdev << 8) | (uint32_t)xfn) : 0;
+
+    uint8_t *gdt = (uint8_t *)0x7C00;
+    memset(gdt, 0, 64);
+    gdt[0] = 23;
+    gdt[1] = 0;
+    *(uint64_t *)(gdt + 2) = 0x7C10ULL;
+    uint8_t *g = (uint8_t *)0x7C10;
+    g[8] = 0xFF; g[9] = 0xFF; g[13] = 0x9A; g[14] = 0xCF;
+    g[16] = 0xFF; g[17] = 0xFF; g[21] = 0x92; g[22] = 0xCF;
+
+    uint64_t n64 = (uint64_t)(_binary_switch64_bin_end - _binary_switch64_bin_start);
+    uint64_t n32 = (uint64_t)(_binary_enter32_bin_end - _binary_enter32_bin_start);
+    memcpy((void *)0x7100, _binary_switch64_bin_start, n64);
+    memcpy((void *)0x7000, _binary_enter32_bin_start, n32);
+
+    sputs("EFI: jump to kernel\n");
+    efi_jump_low(0x1800000ULL);
+    for (;;) __asm__ volatile ("hlt");
+}

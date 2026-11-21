@@ -24,6 +24,10 @@ typedef struct {
     uint32_t font_addr;
     uint32_t font_height;
     uint32_t boot_drive;
+    /* Filled by the UEFI loader. Zero on a BIOS boot. xhci_pci has bit 31
+     * set when bus/dev/fn are valid. The MMIO address is already mapped. */
+    uint32_t xhci_mmio;
+    uint32_t xhci_pci;
 } BootInfo;
 
 static inline const BootInfo *bootinfo(void) {

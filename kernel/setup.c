@@ -355,12 +355,25 @@ static int do_install(const AtaDisk *disk) {
 static void draw_welcome(void) {
     frame("GeometricalOS Setup");
     line(34, "Welcome to Setup", COL_BLACK);
-    line(62, "This program installs GeometricalOS", COL_BLACK);
-    line(80, "onto the computer's hard disk.", COL_BLACK);
-    line(108, "The disk on IDE Primary Master", COL_BLACK);
-    line(126, "will be erased.", COL_MAROON);
-    line(154, "Press ENTER to continue.", COL_NAVY);
+    line(58, "Enter continues. Exit restarts.", COL_NAVY);
+    line(86, "Only an IDE disk can be erased,", COL_BLACK);
+    line(104, "and only after you confirm its name.", COL_BLACK);
+    line(132, "A Windows SSD is not that disk.", COL_BLACK);
+    line(160, "No IDE disk: Start runs in memory.", COL_NAVY);
     draw_buttons("Continue", "Exit");
+    present();
+}
+
+static void draw_live(void) {
+    frame("GeometricalOS Setup");
+    line(34, "No IDE hard disk was found.", COL_BLACK);
+    line(58, "The Windows disk was not changed.", COL_NAVY);
+    line(82, "This USB stick is only for booting.", COL_BLACK);
+    line(110, "Start opens a temporary desktop.", COL_BLACK);
+    line(128, "It stays in memory until restart.", COL_BLACK);
+    line(156, "Exit shuts down. Then boot Windows.", COL_NAVY);
+    line(174, "On an HP, press Esc, then F9.", COL_NAVY);
+    draw_buttons("Start", "Exit");
     present();
 }
 
@@ -500,6 +513,35 @@ static int configure_clock(void) {
     }
 }
 
+static int start_live(void) {
+    if (ata_ramdisk_begin()) return 20;
+    AtaDisk disk;
+    if (ata_probe(&disk) || fs_format(disk.sectors)) return 21;
+    if (settings_set_timezone_minutes(install_timezone) < 0) return 13;
+    static const char readme[] =
+        "Welcome to GeometricalOS.\r\n"
+        "\r\n"
+        "This desktop is running from memory.\r\n"
+        "The USB stick and the Windows disk\r\n"
+        "were not changed. Restarting clears\r\n"
+        "these files.\r\n";
+    if (fs_write(FS_ROOT, "README.TXT", readme, (uint32_t)strlen(readme)) < 0) return 2;
+    char userdat[64];
+    int up = 0;
+    for (int i = 0; acct_name[i] && up < 27; i++) userdat[up++] = acct_name[i];
+    userdat[up++] = '\n';
+    for (int i = 0; acct_pass[i] && up < 60; i++) userdat[up++] = acct_pass[i];
+    userdat[up++] = '\n';
+    if (fs_write(FS_ROOT, "USER.DAT", userdat, (uint32_t)up) < 0) return 2;
+    if (fs_write(FS_ROOT, "WALL.CFG", "0\n", 2) < 0) return 2;
+    int notes = fs_create_dir(FS_ROOT, "NOTES");
+    if (notes < 0) return 3;
+    static const char welcome[] = "Notes from the temporary desktop.\r\n";
+    if (fs_write((uint16_t)notes, "WELCOME.TXT", welcome, (uint32_t)strlen(welcome)) < 0) return 4;
+    serial_write("SETUP: LIVE\n");
+    return 0;
+}
+
 static void draw_fail(int code) {
     frame("GeometricalOS Setup");
     line(34, "Setup could not finish.", COL_MAROON);
@@ -622,6 +664,29 @@ int run_setup(void) {
                 if (pr == -2) err = "Primary Master is the CD drive.";
                 else if (pr == 0 && disk.sectors < 16384) err = "The disk is smaller than 8 MB.";
                 serial_write("SETUP: NODISK\n");
+                if (pr != 0) {
+                    draw_live();
+                    int d = 0;
+                    while (!d) {
+                        d = poll_choice("Start", "Exit");
+                        if (!d) { cursor_restore(); cursor_draw(mouse_x, mouse_y); }
+                    }
+                    if (d == 2) return 1;
+                    configure_clock();
+                    int live = start_live();
+                    if (live) {
+                        serial_write("SETUP: LIVEFAIL\n");
+                        draw_fail(live);
+                        int e = 0;
+                        while (!e) {
+                            e = poll_choice("Back", "Exit");
+                            if (!e) { cursor_restore(); cursor_draw(mouse_x, mouse_y); }
+                        }
+                        if (e == 2) return 1;
+                        continue;
+                    }
+                    return 2;
+                }
                 draw_disk(0, err);
                 int d = 0;
                 while (!d) {

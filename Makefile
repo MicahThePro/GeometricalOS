@@ -1,10 +1,13 @@
 # GeometricalOS — freestanding 32-bit hobby OS.
-# Needs: nasm, gcc -m32 (gcc-multilib), xorriso, ld, python3.
+# Needs: nasm, gcc -m32 (gcc-multilib), xorriso, ld, python3,
+# mingw-w64 x86_64 gcc, mkfs.fat, and mtools.
 
 CC      := gcc
 NASM    := nasm
 OBJCOPY := objcopy
 PYTHON  := python3
+MINGW   := x86_64-w64-mingw32-gcc
+MINGWOBJ := x86_64-w64-mingw32-objcopy
 
 BUILD   := build
 CFLAGS  := -std=gnu11 -m32 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
@@ -23,7 +26,7 @@ C_SRCS := \
 	kernel/app_recycle.c kernel/app_write.c kernel/app_charmap.c kernel/app_cardfile.c kernel/app_recovery.c \
 	kernel/app_tools.c kernel/app_ftp.c \
 	kernel/sound.c kernel/wallpaper.c kernel/login.c kernel/font8x16_fallback.c \
-	kernel/desktop.c kernel/setup.c kernel/pci.c kernel/vmm.c \
+	kernel/desktop.c kernel/setup.c kernel/pci.c kernel/xhci.c kernel/vmm.c \
 	kernel/settings.c kernel/app_control.c kernel/app_player.c \
 	kernel/main.c
 
@@ -120,18 +123,64 @@ $(BUILD)/bootimg.bin: $(BUILD)/stub.bin $(BUILD)/kernel.bin
 	  echo "boot image $$sz bytes"; \
 	  test $$sz -lt 393216
 
-dist/GeometricalOS.iso: $(BUILD)/bootimg.bin | $(BUILD)
+$(BUILD)/switch64.bin: boot/switch64.asm | $(BUILD)
+	$(NASM) -f bin $< -o $@
+
+$(BUILD)/enter32.bin: boot/enter32.asm | $(BUILD)
+	$(NASM) -f bin $< -o $@
+
+$(BUILD)/usb.bin: boot/usb.asm | $(BUILD)
+	$(NASM) -f bin $< -o $@
+	@test $$(stat -c%s $@) -eq 440
+
+$(BUILD)/efi_jump.o: boot/efi_jump.asm | $(BUILD)
+	$(NASM) -f win64 $< -o $@
+
+$(BUILD)/bootimg.o: $(BUILD)/bootimg.bin
+	cd $(BUILD) && $(MINGWOBJ) -I binary -O pe-x86-64 -B i386:x86-64 bootimg.bin bootimg.o
+
+$(BUILD)/switch64.o: $(BUILD)/switch64.bin
+	cd $(BUILD) && $(MINGWOBJ) -I binary -O pe-x86-64 -B i386:x86-64 switch64.bin switch64.o
+
+$(BUILD)/enter32.o: $(BUILD)/enter32.bin
+	cd $(BUILD) && $(MINGWOBJ) -I binary -O pe-x86-64 -B i386:x86-64 enter32.bin enter32.o
+
+$(BUILD)/efi.o: boot/efi.c | $(BUILD)
+	$(MINGW) -ffreestanding -fno-stack-protector -fshort-wchar -mno-red-zone \
+	  -mno-stack-arg-probe -mgeneral-regs-only -O2 -Wall -Wextra \
+	  -Wno-unused-parameter -c boot/efi.c -o $@
+
+$(BUILD)/bootx64.efi: $(BUILD)/efi.o $(BUILD)/efi_jump.o $(BUILD)/bootimg.o $(BUILD)/switch64.o $(BUILD)/enter32.o
+	$(MINGW) -nostdlib -shared -Wl,-e,efi_main -Wl,--subsystem,10 \
+	  -Wl,--image-base,0x4000000 -o $@ $(BUILD)/efi.o $(BUILD)/efi_jump.o \
+	  $(BUILD)/bootimg.o $(BUILD)/switch64.o $(BUILD)/enter32.o
+
+$(BUILD)/efiboot.img: $(BUILD)/bootx64.efi | $(BUILD)
+	rm -f $@
+	dd if=/dev/zero of=$@ bs=1M count=2 status=none
+	mkfs.fat -F 12 $@ >/dev/null
+	mmd -i $@ ::/EFI ::/EFI/BOOT
+	mcopy -i $@ $(BUILD)/bootx64.efi ::/EFI/BOOT/BOOTX64.EFI
+
+dist/GeometricalOS.iso: $(BUILD)/bootimg.bin $(BUILD)/bootx64.efi $(BUILD)/efiboot.img $(BUILD)/usb.bin | $(BUILD)
 	rm -rf iso_root
-	mkdir -p iso_root dist
+	mkdir -p iso_root/EFI/BOOT dist
 	cp $(BUILD)/bootimg.bin iso_root/bootimg.bin
+	cp $(BUILD)/bootx64.efi iso_root/EFI/BOOT/BOOTX64.EFI
+	cp $(BUILD)/efiboot.img iso_root/EFI/BOOT/efiboot.img
 	bytes=$$(stat -c%s iso_root/bootimg.bin); \
 	sectors=$$(( (bytes + 2047) / 2048 * 4 )); \
 	echo "El Torito load sectors (512-byte, multiple of 4): $$sectors"; \
-	genisoimage -quiet -V GEOMETRICALOS \
+	dd if=$(BUILD)/usb.bin of=$(BUILD)/isoh.bin bs=432 count=1 status=none; \
+	xorriso -as mkisofs -quiet -V GEOMETRICALOS -R -J \
 	  -b bootimg.bin -c boot.cat \
-	  -no-emul-boot -boot-load-size $$sectors -boot-load-seg 0x07C0 \
+	  -no-emul-boot -boot-load-size $$sectors \
 	  -boot-info-table \
+	  -eltorito-alt-boot -e EFI/BOOT/efiboot.img -no-emul-boot \
+	  -isohybrid-mbr $(BUILD)/isoh.bin \
+	  -isohybrid-gpt-basdat \
 	  -o dist/GeometricalOS.iso iso_root
+	$(PYTHON) tools/patch_mbr.py dist/GeometricalOS.iso $(BUILD)/usb.bin
 	@echo "ISO dist/GeometricalOS.iso"
 
 iso: dist/GeometricalOS.iso

@@ -10,6 +10,7 @@ typedef struct {
 } AtaDisk;
 
 /* Talks only to the IDE primary master (I/O 0x1F0). */
+int ata_ramdisk_begin(void);
 int ata_probe(AtaDisk *disk);
 int ata_read(uint32_t lba, void *buf, uint32_t count);
 int ata_write(uint32_t lba, const void *buf, uint32_t count);

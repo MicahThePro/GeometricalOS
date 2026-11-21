@@ -98,6 +98,10 @@ cd_boot:
     call early_putc
     mov al, [cs:saved_drive]
     call early_hex
+    ; A USB stick booted as drive 0x80 is the installer. Waiting here and then
+    ; loading the hard disk reloads this same sector and loops.
+    cmp byte [cs:saved_drive], 0x80
+    je .continue_cd
     mov ax, 0x0003
     int 0x10
     mov si, msg_cd
@@ -185,9 +189,9 @@ cd_boot:
     add eax, 2047
     shr eax, 11
 .have_count:
-    cmp ax, 256
+    cmp ax, 1024
     jbe .count_cap
-    mov ax, 256
+    mov ax, 1024
 .count_cap:
     mov [cs:saved_count], ax
     xor bp, bp

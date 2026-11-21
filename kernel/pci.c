@@ -31,6 +31,30 @@ void pci_write16(int bus, int dev, int fn, int off, uint16_t val) {
     outw((uint16_t)(0xCFCu + ((uint32_t)off & 2u)), val);
 }
 
+int pci_find_class(uint8_t class, uint8_t sub, uint8_t prog, int *bus, int *dev, int *fn) {
+    for (int b = 0; b < 256; b++) {
+        for (int d = 0; d < 32; d++) {
+            for (int f = 0; f < 8; f++) {
+                uint32_t id = pci_read(b, d, f, 0);
+                if (id == 0xFFFFFFFFu || id == 0) {
+                    if (f == 0) break;
+                    continue;
+                }
+                uint32_t cls = pci_read(b, d, f, 8);
+                if ((uint8_t)(cls >> 24) == class && (uint8_t)(cls >> 16) == sub &&
+                    (uint8_t)(cls >> 8) == prog) {
+                    if (bus) *bus = b;
+                    if (dev) *dev = d;
+                    if (fn) *fn = f;
+                    return 0;
+                }
+                if (f == 0 && !(pci_read(b, d, 0, 0x0C) & 0x00800000u)) break;
+            }
+        }
+    }
+    return -1;
+}
+
 int pci_find(uint16_t vendor, uint16_t device, int *bus, int *dev, int *fn) {
     for (int b = 0; b < 8; b++) {
         for (int d = 0; d < 32; d++) {

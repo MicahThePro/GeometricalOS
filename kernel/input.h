@@ -49,6 +49,8 @@ typedef struct {
 
 void input_init(void);
 void input_poll(void);
+void input_post_scancode(uint8_t scancode);
+void input_post_mouse(int dx, int dy, int buttons);
 void input_timer(void);
 int input_key(KeyEvent *ev);
 int input_mouse(MouseEvent *ev);
