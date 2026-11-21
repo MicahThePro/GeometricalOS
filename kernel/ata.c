@@ -1,4 +1,5 @@
 #include "ata.h"
+#include "nvme.h"
 #include "io.h"
 #include "serial.h"
 
@@ -8,11 +9,27 @@
 
 static uint8_t *ramdisk;
 static int ramdisk_on;
+static int nvme_win;
+static uint64_t nvme_base;
+static uint32_t nvme_limit;
+
+int disk_use_nvme(uint64_t start_lba, uint32_t sectors) {
+    if (!sectors) {
+        nvme_win = 0;
+        return 0;
+    }
+    nvme_win = 1;
+    nvme_base = start_lba;
+    nvme_limit = sectors;
+    ramdisk_on = 0;
+    return 0;
+}
 
 int ata_ramdisk_begin(void) {
     ramdisk = (uint8_t *)0x2800000;
     memset(ramdisk, 0, RAMDISK_SECTORS * 512u);
     ramdisk_on = 1;
+    nvme_win = 0;
     serial_write("ATA: memory disk\n");
     return 0;
 }
@@ -58,6 +75,12 @@ static void trim_model(char *s) {
 
 int ata_probe(AtaDisk *disk) {
     memset(disk, 0, sizeof(*disk));
+    if (nvme_win) {
+        memcpy(disk->model, "NVMe partition", 15);
+        disk->sectors = nvme_limit;
+        disk->present = 1;
+        return 0;
+    }
     if (ramdisk_on) {
         memcpy(disk->model, "Memory disk", 12);
         disk->sectors = RAMDISK_SECTORS;
@@ -114,6 +137,10 @@ int ata_probe(AtaDisk *disk) {
 }
 
 int ata_read(uint32_t lba, void *buf, uint32_t count) {
+    if (nvme_win) {
+        if (lba + count < lba || lba + count > nvme_limit) return -1;
+        return nvme_read(nvme_base + lba, buf, count);
+    }
     if (ramdisk_on) {
         if (lba + count < lba || lba + count > RAMDISK_SECTORS) return -1;
         memcpy(buf, ramdisk + lba * 512u, count * 512u);
@@ -143,6 +170,10 @@ int ata_read(uint32_t lba, void *buf, uint32_t count) {
 }
 
 int ata_write(uint32_t lba, const void *buf, uint32_t count) {
+    if (nvme_win) {
+        if (lba + count < lba || lba + count > nvme_limit) return -1;
+        return nvme_write(nvme_base + lba, buf, count);
+    }
     if (ramdisk_on) {
         if (lba + count < lba || lba + count > RAMDISK_SECTORS) return -1;
         memcpy((void *)(ramdisk + lba * 512u), buf, count * 512u);
@@ -174,7 +205,7 @@ int ata_write(uint32_t lba, const void *buf, uint32_t count) {
 }
 
 int ata_flush(void) {
-    if (ramdisk_on) return 0;
+    if (nvme_win || ramdisk_on) return 0;
     if (wait_not_busy()) return -1;
     outb(ATA_IO + 6, 0xE0);
     inb(ATA_CTRL);

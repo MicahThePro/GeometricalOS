@@ -84,9 +84,43 @@ static void mouse_push(int type) {
     mq_n++;
 }
 
+static uint32_t byte_count;
+uint32_t input_byte_count(void) { return byte_count; }
+
+static uint8_t set2_to_set1(uint8_t c) {
+    switch (c) {
+    case 0x1C: return 0x1E; case 0x32: return 0x30; case 0x21: return 0x2E;
+    case 0x23: return 0x20; case 0x24: return 0x12; case 0x2B: return 0x21;
+    case 0x34: return 0x22; case 0x33: return 0x23; case 0x43: return 0x17;
+    case 0x3B: return 0x24; case 0x42: return 0x25; case 0x4B: return 0x26;
+    case 0x3A: return 0x32; case 0x31: return 0x31; case 0x44: return 0x18;
+    case 0x4D: return 0x19; case 0x15: return 0x10; case 0x2D: return 0x13;
+    case 0x1B: return 0x1F; case 0x2C: return 0x14; case 0x3C: return 0x16;
+    case 0x2A: return 0x2F; case 0x1D: return 0x11; case 0x22: return 0x2D;
+    case 0x35: return 0x15; case 0x1A: return 0x2C;
+    case 0x16: return 0x02; case 0x1E: return 0x03; case 0x26: return 0x04;
+    case 0x25: return 0x05; case 0x2E: return 0x06; case 0x36: return 0x07;
+    case 0x3D: return 0x08; case 0x3E: return 0x09; case 0x46: return 0x0A;
+    case 0x45: return 0x0B; case 0x5A: return 0x1C; case 0x76: return 0x01;
+    case 0x66: return 0x0E; case 0x0D: return 0x0F; case 0x29: return 0x39;
+    case 0x12: return 0x2A; case 0x59: return 0x36; case 0x14: return 0x1D;
+    case 0x11: return 0x38;
+    default: return 0;
+    }
+}
+
 static void kbd_feed(uint8_t sc) {
+    static int set2, f0;
+    if (sc == 0xF0) { f0 = 1; set2 = 1; return; }
     if (sc == 0xE0) { e0 = 1; return; }
     if (sc == 0xE1) return;
+    if (set2 && !e0) {
+        int release = f0;
+        f0 = 0;
+        uint8_t s1 = set2_to_set1(sc);
+        if (!s1) return;
+        sc = (uint8_t)(s1 | (release ? 0x80 : 0));
+    }
     int release = sc & 0x80;
     sc &= 0x7F;
     if (e0) {
@@ -245,28 +279,38 @@ static void irq_mask_polling(void) {
     outb(0xA1, (uint8_t)(inb(0xA1) | 0x10));
 }
 
-static void mouse_init(void) {
+static void ps2_flush(void) {
+    for (int i = 0; i < 32 && (inb(0x64) & 1); i++) inb(0x60);
+}
+
+/* The Omen keyboard is attached to this controller. Leave the USB
+ * controller alone when the keyboard answers, or resetting USB stops the keys. */
+static int ps2_expect(uint8_t want) {
+    for (int i = 0; i < 6; i++) {
+        int v = ps2_read();
+        if (v == (int)want) return 1;
+        if (v < 0) return 0;
+    }
+    return 0;
+}
+
+static int ps2_keyboard_init(void) {
     irq_mask_polling();
-    while (inb(0x64) & 1) inb(0x60);
-    ps2_cmd(0xA8);
-    ps2_cmd(0x20);
-    int cfg = ps2_read();
-    if (cfg < 0) cfg = 0x45;
-    cfg |= 0x02;
-    cfg &= ~(1 << 5);
-    cfg &= ~(1 << 4);
+    ps2_flush();
+    /* Leave USB alone. Resetting it was stopping the laptop keyboard. */
+    ps2_cmd(0xAE);
     ps2_cmd(0x60);
-    ps2_data((uint8_t)cfg);
-    mouse_write(0xF6);
-    mouse_ack();
-    mouse_write(0xF4);
-    mouse_ack();
+    ps2_data(0x65);
+    ps2_flush();
+    ps2_data(0xF4);
+    ps2_expect(0xFA);
     mouse_x = gfx_width() / 2;
     mouse_y = gfx_height() / 2;
     prev_btn = 0;
     pkt_i = 0;
     pkt_tick = 0;
-    if (!vmm_mouse_init()) serial_write("MOUSE: ps/2\n");
+    serial_write("KBD: listen\n");
+    return 1;
 }
 
 void input_post_scancode(uint8_t scancode) {
@@ -292,10 +336,16 @@ void input_post_mouse(int dx, int dy, int buttons) {
     if (changed & 2) mouse_push((btn & 2) ? MOUSE_RDOWN : MOUSE_RUP);
 }
 
+static int ps2_chip(void) {
+    int floating = 0;
+    for (int i = 0; i < 64; i++) if (inb(0x64) == 0xFF) floating++;
+    return floating < 48;
+}
+
 void input_init(void) {
     pit_init();
-    mouse_init();
-    xhci_init();
+    ps2_keyboard_init();
+    xhci_set_status_line("Listening");
 }
 
 void input_poll(void) {
@@ -309,8 +359,9 @@ void input_poll(void) {
             break;
         }
         uint8_t d = inb(0x60);
+        byte_count++;
         if (flags & 0x200) __asm__ volatile ("sti");
-        if (st & 0x20) mouse_feed(d);
+        if ((st & 0x20) && pkt_i) mouse_feed(d);
         else kbd_feed(d);
     }
     if (vmm_display_poll())

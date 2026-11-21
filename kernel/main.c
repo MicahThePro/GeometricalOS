@@ -10,6 +10,8 @@
 #include "sound.h"
 #include "settings.h"
 #include "recovery.h"
+#include "nvme.h"
+#include "gfx.h"
 
 #define BOOT_NOT_CHECKED (-100)
 
@@ -195,6 +197,33 @@ void kmain(void) {
         halt_screen("GeometricalOS", "This computer needs more memory.", "Give it at least 32 MB of RAM.");
     }
     if (!bi->from_hdd) {
+        uint64_t installed_start = 0;
+        uint32_t installed_sectors = 0;
+        if (nvme_find_geofs(&installed_start, &installed_sectors) &&
+            !disk_use_nvme(installed_start, installed_sectors) && !fs_mount()) {
+            gfx_clear(COL_SETUPBLUE);
+            gfx_text(48, 48, "Installed GeometricalOS", COL_WHITE, COL_SETUPBLUE);
+            gfx_text(48, 72, "Esc opens Setup. Any other key waits.", COL_YELLOW, COL_SETUPBLUE);
+            gfx_present();
+            uint32_t started = timer_ticks();
+            int setup_instead = 0;
+            while (timer_ticks() - started < 200) {
+                input_poll();
+                KeyEvent key;
+                while (input_key(&key)) if (key.code == 27) setup_instead = 1;
+                if (setup_instead) break;
+            }
+            if (!setup_instead) {
+                settings_load();
+                splash_screen();
+                login_screen();
+                desktop_init();
+                serial_write("DESKTOP: READY\n");
+                gui_run();
+                reboot();
+            }
+            disk_use_nvme(0, 0);
+        }
         int recovery_requested = boot_console(
             bi, 0, BOOT_NOT_CHECKED, BOOT_NOT_CHECKED, "Starting the CD installer");
         if (recovery_requested) {
@@ -203,7 +232,7 @@ void kmain(void) {
             recovery_boot_menu(bi, &none, BOOT_NOT_CHECKED, -1);
         }
         int setup_rc = run_setup();
-        if (setup_rc != 2) reboot();
+        if (setup_rc != 2 && setup_rc != 3) reboot();
         serial_write("LIVE: desktop\n");
         settings_load();
         splash_screen();

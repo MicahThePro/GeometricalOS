@@ -55,6 +55,7 @@ void input_timer(void);
 int input_key(KeyEvent *ev);
 int input_mouse(MouseEvent *ev);
 uint32_t timer_ticks(void);
+uint32_t input_byte_count(void);
 
 extern int mouse_x;
 extern int mouse_y;

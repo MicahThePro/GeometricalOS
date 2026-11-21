@@ -11,6 +11,8 @@ typedef struct {
 
 /* Talks only to the IDE primary master (I/O 0x1F0). */
 int ata_ramdisk_begin(void);
+/* Read and write LBAs inside one NVMe partition. */
+int disk_use_nvme(uint64_t start_lba, uint32_t sectors);
 int ata_probe(AtaDisk *disk);
 int ata_read(uint32_t lba, void *buf, uint32_t count);
 int ata_write(uint32_t lba, const void *buf, uint32_t count);

@@ -47,11 +47,24 @@ The Omen (Ryzen 7 8745HX) boots with UEFI. Secure Boot has to be off, because th
    - Partition scheme: **GPT**
    - Target system: **UEFI (non CSM)**
    - File system: **Large FAT32** (this is the option Rufus offers above 32 GB)
-   - Cluster size: **4096 bytes**. A 64 KB cluster size makes this HP firmware report that the boot device failed.
-6. **START** and accept the prompts. Rufus formats the whole stick and copies `\EFI\BOOT\BOOTX64.EFI`. The file is a few hundred kilobytes, so the 32 KB clusters and the 4 GB FAT32 file limit are not a problem.
+   - Cluster size: **4096 bytes** or **32 kilobytes**. A 64 KB cluster size makes this HP firmware report that the boot device failed.
+6. **START** and accept the prompts. Rufus formats the whole stick and copies `\EFI\BOOT\BOOTX64.EFI`.
 7. Shut Windows all the way down. Insert the stick, power on, and tap **Esc**, then **F9**, and choose the USB device. Leave Windows Boot Manager as the default. With the stick unplugged, the computer boots Windows as before.
-8. At Setup, enter a name. When it says no IDE disk was found, press **Enter** for **Start**. Do not look for an Install button on this computer. There is nothing here for Setup to partition.
+8. A yellow **Running** square in the corner means Setup is alive. The built-in touchpad is not a USB or PS/2 device, so use the keyboard. Enter continues.
 9. To go back to Windows, choose **Exit** or shut down, remove the stick if you want, and power on normally.
+
+## Install on an empty section of the SSD
+
+Setup will not erase a Windows partition. It installs only on a blank section from 32 MB to 16 GB.
+
+1. Open Command Prompt as administrator and run `diskpart`.
+2. `list disk`, then `select disk 0` for the internal SSD. Do not select the USB stick.
+3. `shrink desired=512`
+4. `create partition primary size=512`
+5. `exit`. Do not format that new section.
+6. Boot the USB stick, enter a name, and on the empty-section screen confirm the size is about 512 MB. Choose **Install**.
+
+Windows stays on its own partition. Setup copies a boot file to `EFI\GEOMOS\BOOTX64.EFI` on the existing EFI partition. The next USB boot opens the installed desktop. Press Esc during the two-second wait to open Setup instead. The HP boot menu can also open that file with **Boot from EFI File**.
 
 A CD burned from the same ISO boots on UEFI and on BIOS. VirtualBox is unchanged: keep the IDE disk and the CD on the secondary master, and use Install there.
 

@@ -28,6 +28,11 @@ typedef struct {
      * set when bus/dev/fn are valid. The MMIO address is already mapped. */
     uint32_t xhci_mmio;
     uint32_t xhci_pci;
+    /* Raw BOOTX64.EFI copied by the loader, and the NVMe controller. */
+    uint32_t efi_file_addr;
+    uint32_t efi_file_size;
+    uint32_t nvme_mmio;
+    uint32_t nvme_pci;
 } BootInfo;
 
 static inline const BootInfo *bootinfo(void) {
