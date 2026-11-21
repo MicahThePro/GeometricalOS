@@ -186,8 +186,18 @@ static void draw_buttons(const char *primary, const char *secondary) {
 
 static void show_running(void) {
     int on = (int)((timer_ticks() / 5) & 1u);
+    char label[24] = "Keys ";
+    uint32_t n = input_byte_count();
+    char rev[12];
+    int r = 0;
+    if (!n) rev[r++] = '0';
+    while (n && r < 10) { rev[r++] = (char)('0' + n % 10); n /= 10; }
+    int i = 5;
+    while (r) label[i++] = rev[--r];
+    label[i] = 0;
     gfx_fill(16, 16, 16, 16, on ? COL_YELLOW : COL_SETUPBLUE);
-    gfx_text(40, 16, "Running", on ? COL_YELLOW : COL_WHITE, COL_SETUPBLUE);
+    gfx_fill(40, 12, 120, 18, COL_SETUPBLUE);
+    gfx_text(40, 16, label, on ? COL_YELLOW : COL_WHITE, COL_SETUPBLUE);
     present();
 }
 
