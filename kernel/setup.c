@@ -10,6 +10,8 @@
 #include "rtc.h"
 #include "settings.h"
 #include "pci.h"
+#include "xhci.h"
+#include "nvme.h"
 
 static char acct_name[28] = "User";
 static char acct_pass[28];
@@ -182,6 +184,13 @@ static void draw_buttons(const char *primary, const char *secondary) {
     if (secondary) button(x2, y, bw, secondary);
 }
 
+static void show_running(void) {
+    int on = (int)((timer_ticks() / 5) & 1u);
+    gfx_fill(16, 16, 16, 16, on ? COL_YELLOW : COL_SETUPBLUE);
+    gfx_text(40, 16, "Running", on ? COL_YELLOW : COL_WHITE, COL_SETUPBLUE);
+    present();
+}
+
 static int poll_choice(const char *primary, const char *secondary) {
     static int armed;
     static int armed_choice;
@@ -224,6 +233,7 @@ static int poll_choice(const char *primary, const char *secondary) {
             return choice;
         }
     }
+    show_running();
     return 0;
 }
 
@@ -360,6 +370,7 @@ static void draw_welcome(void) {
     line(104, "and only after you confirm its name.", COL_BLACK);
     line(132, "A Windows SSD is not that disk.", COL_BLACK);
     line(160, "No IDE disk: Start runs in memory.", COL_NAVY);
+    line(178, xhci_status_line(), COL_NAVY);
     draw_buttons("Continue", "Exit");
     present();
 }
@@ -511,6 +522,57 @@ static int configure_clock(void) {
         install_clock_from_rtc = 0;
         return 1;
     }
+}
+
+static void draw_nvme(uint32_t sectors) {
+    frame("GeometricalOS Setup");
+    line(34, "An empty SSD section was found.", COL_BLACK);
+    char size[32] = "Size: ";
+    uint32_t mb = sectors / 2048u;
+    char rev[12]; int r = 0;
+    if (!mb) rev[r++] = '0';
+    while (mb && r < 10) { rev[r++] = (char)('0' + mb % 10); mb /= 10; }
+    int n = (int)strlen(size);
+    while (r) size[n++] = rev[--r];
+    size[n] = 0;
+    strcpy(size + n, " MB");
+    line(62, size, COL_NAVY);
+    line(96, "Windows partitions are not used.", COL_BLACK);
+    line(124, "Enter installs on that section.", COL_NAVY);
+    line(148, "Esc keeps Windows and uses memory.", COL_BLACK);
+    draw_buttons("Install", "Memory");
+    present();
+}
+
+static int install_empty_nvme(void) {
+    uint64_t start = 0;
+    uint32_t sectors = 0;
+    if (!nvme_find_empty(&start, &sectors)) return 20;
+    if (disk_use_nvme(start, sectors) || fs_format(sectors)) return 21;
+    if (settings_set_timezone_minutes(install_timezone) < 0) return 13;
+    static const char readme[] =
+        "Welcome to GeometricalOS.\r\n"
+        "\r\n"
+        "This copy is installed on its own\r\n"
+        "SSD section. The Windows partition\r\n"
+        "was not changed.\r\n";
+    if (fs_write(FS_ROOT, "README.TXT", readme, (uint32_t)strlen(readme)) < 0) return 2;
+    char userdat[64];
+    int up = 0;
+    for (int i = 0; acct_name[i] && up < 27; i++) userdat[up++] = acct_name[i];
+    userdat[up++] = '\n';
+    for (int i = 0; acct_pass[i] && up < 60; i++) userdat[up++] = acct_pass[i];
+    userdat[up++] = '\n';
+    if (fs_write(FS_ROOT, "USER.DAT", userdat, (uint32_t)up) < 0) return 2;
+    if (fs_write(FS_ROOT, "WALL.CFG", "0\n", 2) < 0) return 2;
+    int notes = fs_create_dir(FS_ROOT, "NOTES");
+    if (notes < 0) return 3;
+    static const char welcome[] = "Notes from the installed desktop.\r\n";
+    if (fs_write((uint16_t)notes, "WELCOME.TXT", welcome, (uint32_t)strlen(welcome)) < 0) return 4;
+    if (nvme_store_bootloader()) serial_write("NVME: boot file not copied\n");
+    else serial_write("NVME: boot file copied\n");
+    serial_write("SETUP: NVME INSTALL\n");
+    return 0;
 }
 
 static int start_live(void) {
@@ -665,6 +727,35 @@ int run_setup(void) {
                 else if (pr == 0 && disk.sectors < 16384) err = "The disk is smaller than 8 MB.";
                 serial_write("SETUP: NODISK\n");
                 if (pr != 0) {
+                    uint64_t empty_start = 0;
+                    uint32_t empty_sectors = 0;
+                    if (nvme_find_empty(&empty_start, &empty_sectors)) {
+                        draw_nvme(empty_sectors);
+                        int d = 0;
+                        while (!d) {
+                            d = poll_choice("Install", "Memory");
+                            if (!d) { cursor_restore(); cursor_draw(mouse_x, mouse_y); }
+                        }
+                        if (d == 2) {
+                            int live = start_live();
+                            if (live) return 1;
+                            return 2;
+                        }
+                        configure_clock();
+                        int installed = install_empty_nvme();
+                        if (installed) {
+                            serial_write("SETUP: NVMEFAIL\n");
+                            draw_fail(installed);
+                            int e = 0;
+                            while (!e) {
+                                e = poll_choice("Back", "Exit");
+                                if (!e) { cursor_restore(); cursor_draw(mouse_x, mouse_y); }
+                            }
+                            if (e == 2) return 1;
+                            continue;
+                        }
+                        return 3;
+                    }
                     draw_live();
                     int d = 0;
                     while (!d) {

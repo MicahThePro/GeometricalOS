@@ -3,5 +3,6 @@
 
 void xhci_init(void);
 void xhci_poll(void);
+const char *xhci_status_line(void);
 
 #endif

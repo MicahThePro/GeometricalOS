@@ -261,6 +261,9 @@ static void mouse_init(void) {
     mouse_ack();
     mouse_write(0xF4);
     mouse_ack();
+    ps2_cmd(0xAE);
+    ps2_data(0xF4);
+    ps2_read();
     mouse_x = gfx_width() / 2;
     mouse_y = gfx_height() / 2;
     prev_btn = 0;

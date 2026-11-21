@@ -196,7 +196,8 @@ static uint32_t pci_read(int bus, int dev, int fn, int off) {
     return inl(0xCFC);
 }
 
-static int find_xhci(int *bus, int *dev, int *fn, uint64_t *bar, uint32_t *size) {
+static int find_pci(uint8_t want_base, uint8_t want_sub, uint8_t want_prog,
+                    int *bus, int *dev, int *fn, uint64_t *bar, uint32_t *size, uint32_t bar_size) {
     for (int b = 0; b < 256; b++) {
         for (int d = 0; d < 32; d++) {
             for (int f = 0; f < 8; f++) {
@@ -209,7 +210,7 @@ static int find_xhci(int *bus, int *dev, int *fn, uint64_t *bar, uint32_t *size)
                 uint8_t base = (uint8_t)(class >> 24);
                 uint8_t sub = (uint8_t)(class >> 16);
                 uint8_t prog = (uint8_t)(class >> 8);
-                if (base == 0x0C && sub == 0x03 && prog == 0x30) {
+                if (base == want_base && sub == want_sub && prog == want_prog) {
                     uint32_t lo = pci_read(b, d, f, 0x10);
                     uint32_t hi = 0;
                     if ((lo & 0x7u) == 0x4u) hi = pci_read(b, d, f, 0x14);
@@ -218,7 +219,7 @@ static int find_xhci(int *bus, int *dev, int *fn, uint64_t *bar, uint32_t *size)
                         *dev = d;
                         *fn = f;
                         *bar = ((uint64_t)hi << 32) | (lo & ~0xFu);
-                        *size = 0x20000;
+                        *size = bar_size;
                         return 1;
                     }
                 }
@@ -314,6 +315,49 @@ static void say(EfiSystemTable *st, const char *s) {
 
 static uint8_t mapbuf[48 * 1024];
 
+static uint32_t save_boot_file(efi_handle image, EfiBootServices *bs) {
+    static uint8_t li_guid[16] = {
+        0xA1, 0x31, 0x1B, 0x5B, 0x62, 0x95, 0xD2, 0x11,
+        0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B
+    };
+    static uint8_t fs_guid[16] = {
+        0x22, 0x5B, 0x4E, 0x96, 0x59, 0x64, 0xD2, 0x11,
+        0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B
+    };
+    typedef efi_status (*open_fn)(efi_handle, uint8_t *, void **, efi_handle, efi_handle, uint32_t);
+    open_fn open = (open_fn)bs->open_protocol;
+    void *loaded = 0;
+    if (!open || open(image, li_guid, &loaded, image, 0, 2) || !loaded) return 0;
+    efi_handle device = *(efi_handle *)((uint8_t *)loaded + 24);
+    void *fs = 0;
+    if (open(device, fs_guid, &fs, image, 0, 2) || !fs) return 0;
+    typedef struct { uint64_t rev; efi_status (*open_volume)(void *, void **); } Fs;
+    void *root = 0;
+    if (((Fs *)fs)->open_volume(fs, &root) || !root) return 0;
+    typedef struct {
+        uint64_t rev;
+        efi_status (*open)(void *, void **, uint16_t *, uint64_t, uint64_t);
+        efi_status (*close)(void *);
+        void *del;
+        efi_status (*read)(void *, uintn *, void *);
+    } File;
+    static uint16_t path[] = {
+        '\\','E','F','I','\\','B','O','O','T','\\','B','O','O','T','X','6','4','.','E','F','I', 0
+    };
+    void *file = 0;
+    if (((File *)root)->open(root, &file, path, 1, 0) || !file) return 0;
+    uint8_t *dst = (uint8_t *)0x800000;
+    uint32_t got = 0;
+    while (got + 4096u <= 512u * 1024u) {
+        uintn n = 4096;
+        if (((File *)file)->read(file, &n, dst + got) || !n) break;
+        got += (uint32_t)n;
+    }
+    ((File *)file)->close(file);
+    if (got >= 4096) sputs("EFI: saved boot file\n");
+    return got >= 4096 ? got : 0;
+}
+
 efi_status efi_main(efi_handle image, EfiSystemTable *st) {
     serial_init();
     sputs("\nEFI: GeometricalOS\n");
@@ -374,7 +418,12 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
     int xbus = 0, xdev = 0, xfn = 0;
     uint64_t xbar = 0;
     uint32_t xsize = 0;
-    int have_xhci = find_xhci(&xbus, &xdev, &xfn, &xbar, &xsize);
+    int have_xhci = find_pci(0x0C, 0x03, 0x30, &xbus, &xdev, &xfn, &xbar, &xsize, 0x20000);
+    int nbus = 0, ndev = 0, nfn = 0;
+    uint64_t nbar = 0;
+    uint32_t nsize = 0;
+    int have_nvme = find_pci(0x01, 0x08, 0x02, &nbus, &ndev, &nfn, &nbar, &nsize, 0x4000);
+    uint32_t saved_efi = save_boot_file(image, bs);
 
     uintn map_size = sizeof(mapbuf);
     uintn map_key = 0, desc_size = 0;
@@ -420,6 +469,8 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
     uint32_t lfb = map_device(fb, fb_bytes, 0xE0000000u);
     uint32_t xhci = 0;
     if (have_xhci) xhci = map_device(xbar, xsize ? xsize : 0x20000u, 0xF0000000u);
+    uint32_t nvme = 0;
+    if (have_nvme) nvme = map_device(nbar, nsize ? nsize : 0x4000u, 0xF8000000u);
 
     uint32_t red_pos, red_sz, green_pos, green_sz, blue_pos, blue_sz;
     if (format == 0) {
@@ -456,6 +507,10 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
     info[16] = 0;
     info[17] = xhci;
     info[18] = have_xhci ? (0x80000000u | ((uint32_t)xbus << 16) | ((uint32_t)xdev << 8) | (uint32_t)xfn) : 0;
+    info[19] = saved_efi ? 0x800000u : 0;
+    info[20] = saved_efi;
+    info[21] = nvme;
+    info[22] = have_nvme ? (0x80000000u | ((uint32_t)nbus << 16) | ((uint32_t)ndev << 8) | (uint32_t)nfn) : 0;
 
     uint8_t *gdt = (uint8_t *)0x7C00;
     memset(gdt, 0, 64);

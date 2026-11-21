@@ -48,6 +48,21 @@ typedef struct {
 
 static HidEp eps[4];
 static int ep_count;
+static char status_line[28] = "No USB keyboard";
+
+const char *xhci_status_line(void) { return status_line; }
+
+static void note_status(void) {
+    int keyboard = 0;
+    for (int i = 0; i < ep_count; i++) if (eps[i].kind == 1) keyboard = 1;
+    const char *text = keyboard ? "USB keyboard ready" : "No USB keyboard";
+    int i = 0;
+    for (; text[i] && i < (int)sizeof(status_line) - 1; i++) status_line[i] = text[i];
+    status_line[i] = 0;
+}
+
+static int enumerate_device(int root_port, int speed, uint32_t route, int parent_slot,
+                            int parent_port, uint32_t slots, int depth, int hub_mtt, int think);
 
 static void *halloc(uint32_t size, uint32_t align) {
     uint32_t a = (heap_used + align - 1u) & ~(align - 1u);
@@ -346,7 +361,63 @@ static void arm_interrupt(HidEp *ep) {
     doorbell(ep->slot, (uint32_t)ep->dci);
 }
 
-static int enumerate_port(int port, int speed, uint32_t slots) {
+static void enumerate_hub(Ring *ep0, int hub_slot, int root_port, uint32_t route, int depth,
+                           uint32_t slots, int hub_speed, int hub_mtt) {
+    uint32_t code = 0;
+    uint8_t *hub = halloc(16, 64);
+    uint8_t *st = halloc(8, 64);
+    if (!hub || !st) return;
+    if (control(ep0, hub_slot, 0xA0, 6, 0x2900, 0, hub, 9, 1, &code) || (code != 1 && code != 13)) {
+        serial_write("XHCI: hub descriptor failed\n");
+        return;
+    }
+    int ports = hub[2];
+    int think = (hub[3] >> 5) & 3;
+    if (ports > 8) ports = 8;
+    if (ports < 1) return;
+    serial_write("XHCI: hub ports ");
+    serial_dec((uint32_t)ports);
+    serial_write("\n");
+    for (int p = 1; p <= ports; p++)
+        control(ep0, hub_slot, 0x23, 3, 8, (uint16_t)p, 0, 0, 0, &code);
+    wait_ms(100);
+    for (int p = 1; p <= ports; p++) {
+        memset(st, 0, 4);
+        if (control(ep0, hub_slot, 0xA3, 0, 0, (uint16_t)p, st, 4, 1, &code)) continue;
+        uint16_t w = (uint16_t)(st[0] | (st[1] << 8));
+        if ((w & 1u) == 0) continue;
+        control(ep0, hub_slot, 0x23, 3, 4, (uint16_t)p, 0, 0, 0, &code);
+        int child_speed = 1;
+        for (int t = 0; t < 30; t++) {
+            wait_ms(10);
+            memset(st, 0, 4);
+            if (control(ep0, hub_slot, 0xA3, 0, 0, (uint16_t)p, st, 4, 1, &code)) break;
+            w = (uint16_t)(st[0] | (st[1] << 8));
+            if (w & (1u << 4)) continue;
+            if (w & (1u << 9)) child_speed = 2;
+            else if (w & (1u << 10)) child_speed = 3;
+            else child_speed = 1;
+            break;
+        }
+        control(ep0, hub_slot, 0x23, 1, 20, (uint16_t)p, 0, 0, 0, &code);
+        if ((w & 1u) == 0) continue;
+        uint32_t child_route = route | ((uint32_t)p << (depth * 4));
+        int parent = 0, parent_port_num = 0;
+        if (hub_speed >= 3 && child_speed < 3) {
+            parent = hub_slot;
+            parent_port_num = p;
+        }
+        serial_write("XHCI: hub device port ");
+        serial_dec((uint32_t)p);
+        serial_write("\n");
+        enumerate_device(root_port, child_speed, child_route, parent, parent_port_num,
+                         slots, depth + 1, hub_mtt, think);
+    }
+}
+
+static int enumerate_device(int root_port, int speed, uint32_t route, int parent_slot,
+                            int parent_port, uint32_t slots, int depth, int hub_mtt, int think) {
+    if (depth > 3) return 0;
     uint32_t code = 0, slot = 0;
     Trb *enable = ring_push(&cmd, 0, 0, 0, 9u << 10);
     doorbell(0, 0);
@@ -364,8 +435,10 @@ static int enumerate_port(int port, int speed, uint32_t slots) {
     uint32_t *cd = (uint32_t *)ctx_at(input, 0);
     cd[1] = (1u << 0) | (1u << 1);
     uint32_t *sd = (uint32_t *)ctx_at(input, 1);
-    sd[0] = ((uint32_t)speed << 20) | (1u << 27);
-    sd[1] = (uint32_t)(port + 1) << 16;
+    sd[0] = (route & 0xFFFFFu) | ((uint32_t)speed << 20) | (1u << 27);
+    if (parent_slot && hub_mtt) sd[0] |= 1u << 25;
+    sd[1] = (uint32_t)(root_port + 1) << 16;
+    sd[2] = (uint32_t)parent_slot | ((uint32_t)parent_port << 8) | ((uint32_t)think << 16);
     uint32_t *ed = (uint32_t *)ctx_at(input, 2);
     ed[1] = (3u << 1) | (4u << 3) | (mps << 16);
     ed[2] = (uint32_t)(uintptr_t)ep0.trb | 1u;
@@ -383,6 +456,8 @@ static int enumerate_port(int port, int speed, uint32_t slots) {
         serial_write("\n");
         return -5;
     }
+    int dev_class = desc[4];
+    int dev_proto = desc[7];
     uint16_t total = 9;
     if (control(&ep0, (int)slot, 0x80, 6, 0x0200, 0, desc, 9, 1, &code) || (code != 1 && code != 13))
         return -6;
@@ -392,6 +467,7 @@ static int enumerate_port(int port, int speed, uint32_t slots) {
         return -7;
     uint8_t config_val = desc[5];
     int iface = 0, iclass = 0, isub = 0, iproto = 0;
+    int is_hub = dev_class == 9;
     int before = ep_count;
     for (int off = 0; off + 2 <= total; ) {
         int dl = desc[off];
@@ -402,7 +478,9 @@ static int enumerate_port(int port, int speed, uint32_t slots) {
             iclass = desc[off + 5];
             isub = desc[off + 6];
             iproto = desc[off + 7];
-        } else if (dt == 5 && dl >= 7 && iclass == 3 && isub == 1 && (iproto == 1 || iproto == 2)) {
+            if (iclass == 9) is_hub = 1;
+        } else if (dt == 5 && dl >= 7 && iclass == 3 &&
+                   (isub == 1 || iproto == 1 || iproto == 2)) {
             uint8_t addr = desc[off + 2];
             uint8_t attr = desc[off + 3];
             int emp = desc[off + 4] | (desc[off + 5] << 8);
@@ -411,6 +489,13 @@ static int enumerate_port(int port, int speed, uint32_t slots) {
                 add_hid((int)slot, speed, iproto, iface, addr & 0x0F, emp, bint, input, output);
         }
         off += dl;
+    }
+    if (is_hub) {
+        if (control(&ep0, (int)slot, 0x00, 9, config_val, 0, 0, 0, 0, &code) || code != 1)
+            return -9;
+        enumerate_hub(&ep0, (int)slot, root_port, route, depth, slots, speed, dev_proto == 2);
+        note_status();
+        return 0;
     }
     if (ep_count == before) return 0;
     memcpy(ctx_at(input, 1), ctx_at(output, 0), ctx_size);
@@ -435,6 +520,7 @@ static int enumerate_port(int port, int speed, uint32_t slots) {
         arm_interrupt(&eps[i]);
         serial_write(eps[i].kind == 1 ? "XHCI: keyboard\n" : "XHCI: mouse\n");
     }
+    note_status();
     return 0;
 }
 
@@ -509,6 +595,7 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
         wait_ms(10);
     }
     if (rd(op + 1) & 1u) return -8;
+    wait_ms(300);
     ep_count = 0;
     for (uint32_t p = 0; p < ports; p++) {
         int speed = port_reset((int)p);
@@ -518,7 +605,7 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
         serial_write(" speed ");
         serial_dec((uint32_t)speed);
         serial_write("\n");
-        int rc = enumerate_port((int)p, speed, slots);
+        int rc = enumerate_device((int)p, speed, 0, 0, 0, slots, 0, 0, 0);
         if (rc) {
             serial_write("XHCI: port error ");
             serial_dec((uint32_t)(-rc));
@@ -526,6 +613,7 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
         }
     }
     ready = ep_count > 0;
+    note_status();
     return ready ? 0 : -9;
 }
 
