@@ -8,7 +8,7 @@
 /* Rings live outside the kernel image so the image still fits below 0x70000.
  * The UEFI loader identity-maps this range. */
 #define XHCI_HEAP ((uint8_t *)0x1100000)
-#define XHCI_HEAP_SIZE (256u * 1024u)
+#define XHCI_HEAP_SIZE (384u * 1024u)
 
 typedef struct {
     uint32_t d[4];
@@ -624,17 +624,20 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
     if (!dcbaa) return -4;
     memset(dcbaa, 0, (slots + 1u) * 8u);
     if (scratch) {
-        if (scratch > 16) scratch = 16;
+        if (scratch > 32) scratch = 32;
         uint64_t *spa = halloc(scratch * 8u, 64);
         if (!spa) return -5;
         for (uint32_t i = 0; i < scratch; i++) {
             void *page = halloc(4096, 4096);
             if (!page) return -5;
             memset(page, 0, 4096);
+            flush_range(page, 4096);
             spa[i] = (uint64_t)(uintptr_t)page;
         }
         dcbaa[0] = (uint64_t)(uintptr_t)spa;
+        flush_range(spa, scratch * 8u);
     }
+    flush_range(dcbaa, (slots + 1u) * 8u);
     if (ring_init(&cmd, 32, 1) || ring_init(&event, 64, 0)) return -6;
     uint32_t *erst = halloc(16, 64);
     if (!erst) return -7;

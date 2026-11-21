@@ -251,32 +251,38 @@ static void ps2_flush(void) {
 
 /* The Omen keyboard is attached to this controller. Leave the USB
  * controller alone when the keyboard answers, or resetting USB stops the keys. */
+static int ps2_expect(uint8_t want) {
+    for (int i = 0; i < 6; i++) {
+        int v = ps2_read();
+        if (v == (int)want) return 1;
+        if (v < 0) return 0;
+    }
+    return 0;
+}
+
 static int ps2_keyboard_init(void) {
     irq_mask_polling();
     ps2_cmd(0xAD);
     ps2_cmd(0xA7);
     ps2_flush();
     ps2_cmd(0xAE);
-    ps2_cmd(0x20);
-    int cfg = ps2_read();
-    if (cfg < 0) cfg = 0x45;
-    cfg |= 0x41;
-    cfg &= ~(1 << 4);
+    /* Bit 2 tells the laptop keyboard controller that the OS is running.
+     * Without it the Omen accepts commands and then sends no keys. */
     ps2_cmd(0x60);
-    ps2_data((uint8_t)cfg);
+    ps2_data(0x65);
     ps2_flush();
+    ps2_data(0xFF);
+    ps2_expect(0xFA);
+    ps2_expect(0xAA);
     ps2_data(0xF4);
-    int ack = ps2_read();
+    int ack = ps2_expect(0xFA);
     mouse_x = gfx_width() / 2;
     mouse_y = gfx_height() / 2;
     prev_btn = 0;
     pkt_i = 0;
     pkt_tick = 0;
-    if (ack == 0xFA) {
-        serial_write("KBD: laptop\n");
-        return 1;
-    }
-    return 0;
+    if (ack) serial_write("KBD: laptop\n");
+    return ack;
 }
 
 void input_post_scancode(uint8_t scancode) {
@@ -328,7 +334,7 @@ void input_poll(void) {
         }
         uint8_t d = inb(0x60);
         if (flags & 0x200) __asm__ volatile ("sti");
-        if (st & 0x20) mouse_feed(d);
+        if ((st & 0x20) && pkt_i) mouse_feed(d);
         else kbd_feed(d);
     }
     if (vmm_display_poll())
