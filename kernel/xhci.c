@@ -235,6 +235,7 @@ static int control(Ring *ep0, int slot, uint8_t bm, uint8_t req, uint16_t val,
         if (type != 32) continue;
         uint32_t got = ev.d[2] >> 24;
         if (code) *code = got;
+        if ((got == 1 || got == 13) && dir_in && data && len) flush_range(data, len);
         return (got == 1 || got == 13) ? 0 : -1;
     }
     if (code) *code = 0;
@@ -647,7 +648,8 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
     wr(rt + (0x08 / 4), 1);
     wr64(rt + (0x10 / 4), (uint32_t)(uintptr_t)erst);
     wr64(rt + (0x18 / 4), (uint32_t)(uintptr_t)event.trb);
-    wr(op, rd(op) | 1u);
+    wr(rt, 0x2);
+    wr(op, rd(op) | 1u | 4u);
     for (int i = 0; i < 100; i++) {
         if ((rd(op + 1) & 1u) == 0) break;
         wait_ms(10);

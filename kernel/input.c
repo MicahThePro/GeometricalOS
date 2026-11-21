@@ -310,12 +310,10 @@ static int ps2_chip(void) {
 
 void input_init(void) {
     pit_init();
-    if (ps2_chip() && ps2_keyboard_init()) {
-        xhci_set_status_line("Laptop keyboard");
-        return;
-    }
+    int laptop = ps2_chip() && ps2_keyboard_init();
     xhci_init();
-    xhci_append_status(ps2_chip() ? " PS/2 silent" : " PS/2 no");
+    if (laptop) xhci_append_status(" PS/2 ack");
+    else xhci_append_status(ps2_chip() ? " PS/2 silent" : " PS/2 no");
 }
 
 void input_poll(void) {
