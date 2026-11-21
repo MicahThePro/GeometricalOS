@@ -295,10 +295,18 @@ void input_post_mouse(int dx, int dy, int buttons) {
     if (changed & 2) mouse_push((btn & 2) ? MOUSE_RDOWN : MOUSE_RUP);
 }
 
+static int ps2_chip(void) {
+    int floating = 0;
+    for (int i = 0; i < 64; i++) if (inb(0x64) == 0xFF) floating++;
+    return floating < 48;
+}
+
 void input_init(void) {
     pit_init();
+    int ps2 = ps2_chip();
     mouse_init();
     xhci_init();
+    xhci_append_status(ps2 ? " PS/2 yes" : " PS/2 no");
 }
 
 void input_poll(void) {
