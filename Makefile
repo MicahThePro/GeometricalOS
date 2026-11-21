@@ -150,10 +150,11 @@ $(BUILD)/efi.o: boot/efi.c | $(BUILD)
 	  -mno-stack-arg-probe -mgeneral-regs-only -O2 -Wall -Wextra \
 	  -Wno-unused-parameter -c boot/efi.c -o $@
 
-$(BUILD)/bootx64.efi: $(BUILD)/efi.o $(BUILD)/efi_jump.o $(BUILD)/bootimg.o $(BUILD)/switch64.o $(BUILD)/enter32.o
+$(BUILD)/bootx64.efi: $(BUILD)/efi.o $(BUILD)/efi_jump.o $(BUILD)/bootimg.o $(BUILD)/switch64.o $(BUILD)/enter32.o tools/patch_efi.py
 	$(MINGW) -nostdlib -shared -Wl,-e,efi_main -Wl,--subsystem,10 \
 	  -Wl,--image-base,0x4000000 -o $@ $(BUILD)/efi.o $(BUILD)/efi_jump.o \
 	  $(BUILD)/bootimg.o $(BUILD)/switch64.o $(BUILD)/enter32.o
+	$(PYTHON) tools/patch_efi.py $@
 
 $(BUILD)/efiboot.img: $(BUILD)/bootx64.efi | $(BUILD)
 	rm -f $@

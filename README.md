@@ -47,7 +47,7 @@ The Omen (Ryzen 7 8745HX) boots with UEFI. Secure Boot has to be off, because th
    - Partition scheme: **GPT**
    - Target system: **UEFI (non CSM)**
    - File system: **Large FAT32** (this is the option Rufus offers above 32 GB)
-   - Cluster size: **32 kilobytes**
+   - Cluster size: **4096 bytes**. A 64 KB cluster size makes this HP firmware report that the boot device failed.
 6. **START** and accept the prompts. Rufus formats the whole stick and copies `\EFI\BOOT\BOOTX64.EFI`. The file is a few hundred kilobytes, so the 32 KB clusters and the 4 GB FAT32 file limit are not a problem.
 7. Shut Windows all the way down. Insert the stick, power on, and tap **Esc**, then **F9**, and choose the USB device. Leave Windows Boot Manager as the default. With the stick unplugged, the computer boots Windows as before.
 8. At Setup, enter a name. When it says no IDE disk was found, press **Enter** for **Start**. Do not look for an Install button on this computer. There is nothing here for Setup to partition.
