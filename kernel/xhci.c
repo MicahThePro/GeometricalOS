@@ -53,6 +53,10 @@ static int saw_controller, saw_ports, saw_devs, saw_hubs, last_err;
 
 const char *xhci_status_line(void) { return status_line; }
 
+static void set_status(const char *text);
+
+void xhci_set_status_line(const char *text) { set_status(text); }
+
 void xhci_append_status(const char *extra) {
     int i = 0;
     while (status_line[i] && i < (int)sizeof(status_line) - 1) i++;
@@ -465,7 +469,7 @@ static int enumerate_device(int root_port, int speed, uint32_t route, int parent
     memset(input, 0, 33u * ctx_size);
     memset(output, 0, 32u * ctx_size);
     dcbaa[slot] = (uint64_t)(uintptr_t)output;
-    uint32_t mps = speed == 2 ? 8 : (speed >= 4 ? 512 : 64);
+    uint32_t mps = speed <= 2 ? 8 : (speed >= 4 ? 512 : 64);
     uint32_t *cd = (uint32_t *)ctx_at(input, 0);
     cd[1] = (1u << 0) | (1u << 1);
     uint32_t *sd = (uint32_t *)ctx_at(input, 1);
@@ -484,14 +488,27 @@ static int enumerate_device(int root_port, int speed, uint32_t route, int parent
     uint8_t *desc = halloc(256, 64);
     if (!desc) return -5;
     memset(desc, 0, 256);
-    if (control(&ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 18, 1, &code) || (code != 1 && code != 13)) {
+    if (control(&ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code) || (code != 1 && code != 13)) {
         serial_write("XHCI: desc code ");
         serial_dec(code);
         serial_write("\n");
         return -5;
     }
+    uint32_t packet = desc[7];
+    if (speed >= 4 && packet == 9) packet = 512;
+    if (packet != mps && (packet == 8 || packet == 16 || packet == 32 || packet == 64 || packet == 512)) {
+        ed[1] = (3u << 1) | (4u << 3) | (packet << 16);
+        cd[0] = 0;
+        cd[1] = 1u << 1;
+        Trb *eval = ring_push(&cmd, (uint32_t)(uintptr_t)input, 0, 0, (13u << 10) | (slot << 24));
+        doorbell(0, 0);
+        wait_event(33, (uint32_t)(uintptr_t)eval, &code, 0);
+        mps = packet;
+    }
+    if (control(&ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 18, 1, &code) || (code != 1 && code != 13))
+        return -5;
     int dev_class = desc[4];
-    int dev_proto = desc[7];
+    int dev_proto = desc[6];
     uint16_t total = 9;
     if (control(&ep0, (int)slot, 0x80, 6, 0x0200, 0, desc, 9, 1, &code) || (code != 1 && code != 13))
         return -6;

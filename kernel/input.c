@@ -245,31 +245,38 @@ static void irq_mask_polling(void) {
     outb(0xA1, (uint8_t)(inb(0xA1) | 0x10));
 }
 
-static void mouse_init(void) {
+static void ps2_flush(void) {
+    for (int i = 0; i < 32 && (inb(0x64) & 1); i++) inb(0x60);
+}
+
+/* The Omen keyboard is attached to this controller. Leave the USB
+ * controller alone when the keyboard answers, or resetting USB stops the keys. */
+static int ps2_keyboard_init(void) {
     irq_mask_polling();
-    while (inb(0x64) & 1) inb(0x60);
-    ps2_cmd(0xA8);
+    ps2_cmd(0xAD);
+    ps2_cmd(0xA7);
+    ps2_flush();
+    ps2_cmd(0xAE);
     ps2_cmd(0x20);
     int cfg = ps2_read();
     if (cfg < 0) cfg = 0x45;
-    cfg |= 0x02;
-    cfg &= ~(1 << 5);
+    cfg |= 0x41;
     cfg &= ~(1 << 4);
     ps2_cmd(0x60);
     ps2_data((uint8_t)cfg);
-    mouse_write(0xF6);
-    mouse_ack();
-    mouse_write(0xF4);
-    mouse_ack();
-    ps2_cmd(0xAE);
+    ps2_flush();
     ps2_data(0xF4);
-    ps2_read();
+    int ack = ps2_read();
     mouse_x = gfx_width() / 2;
     mouse_y = gfx_height() / 2;
     prev_btn = 0;
     pkt_i = 0;
     pkt_tick = 0;
-    if (!vmm_mouse_init()) serial_write("MOUSE: ps/2\n");
+    if (ack == 0xFA) {
+        serial_write("KBD: laptop\n");
+        return 1;
+    }
+    return 0;
 }
 
 void input_post_scancode(uint8_t scancode) {
@@ -303,10 +310,12 @@ static int ps2_chip(void) {
 
 void input_init(void) {
     pit_init();
-    int ps2 = ps2_chip();
-    mouse_init();
+    if (ps2_chip() && ps2_keyboard_init()) {
+        xhci_set_status_line("Laptop keyboard");
+        return;
+    }
     xhci_init();
-    xhci_append_status(ps2 ? " PS/2 yes" : " PS/2 no");
+    xhci_append_status(ps2_chip() ? " PS/2 silent" : " PS/2 no");
 }
 
 void input_poll(void) {
