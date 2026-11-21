@@ -202,7 +202,15 @@ void kmain(void) {
             memset(&none, 0, sizeof(none));
             recovery_boot_menu(bi, &none, BOOT_NOT_CHECKED, -1);
         }
-        run_setup();
+        int setup_rc = run_setup();
+        if (setup_rc != 2) reboot();
+        serial_write("LIVE: desktop\n");
+        settings_load();
+        splash_screen();
+        login_screen();
+        desktop_init();
+        serial_write("DESKTOP: READY\n");
+        gui_run();
         reboot();
     }
     AtaDisk disk;

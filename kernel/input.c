@@ -5,6 +5,7 @@
 #include "serial.h"
 #include "settings.h"
 #include "sound.h"
+#include "xhci.h"
 
 int mouse_x, mouse_y, mouse_buttons;
 
@@ -268,12 +269,37 @@ static void mouse_init(void) {
     if (!vmm_mouse_init()) serial_write("MOUSE: ps/2\n");
 }
 
+void input_post_scancode(uint8_t scancode) {
+    kbd_feed(scancode);
+}
+
+void input_post_mouse(int dx, int dy, int buttons) {
+    if (dx > 40) dx = 40;
+    if (dx < -40) dx = -40;
+    if (dy > 40) dy = 40;
+    if (dy < -40) dy = -40;
+    if (!vmm_mouse_absolute()) {
+        mouse_x += scale_delta(dx);
+        mouse_y += scale_delta(dy);
+        mouse_clamp();
+    }
+    int btn = buttons & 3;
+    if (settings_swap_buttons()) btn = (btn & ~3) | ((btn & 1) << 1) | ((btn & 2) >> 1);
+    int changed = btn ^ prev_btn;
+    prev_btn = btn;
+    mouse_buttons = btn;
+    if (changed & 1) mouse_push((btn & 1) ? MOUSE_LDOWN : MOUSE_LUP);
+    if (changed & 2) mouse_push((btn & 2) ? MOUSE_RDOWN : MOUSE_RUP);
+}
+
 void input_init(void) {
     pit_init();
     mouse_init();
+    xhci_init();
 }
 
 void input_poll(void) {
+    xhci_poll();
     for (int n = 0; n < 32; n++) {
         uint32_t flags;
         __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags) : : "memory");

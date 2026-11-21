@@ -33,6 +33,28 @@ It is not Linux. It is a 32-bit freestanding kernel with its own bootloader, a s
 
 The boot splash is a static geometric logo (a square, a circle, and a triangle) with the name GeometricalOS. It stays up for a couple of seconds, then the logon screen appears.
 
+## Boot it from a 64 GB USB stick with Rufus
+
+This is a second boot choice next to Windows. GeometricalOS does not install onto the internal SSD, and Setup will not erase that disk. The stick is only the boot drive. On a computer with no IDE disk, choose **Start** to open a temporary desktop that lives in memory until you restart.
+
+The Omen (Ryzen 7 8745HX) boots with UEFI. Secure Boot has to be off, because this loader is not signed by Microsoft.
+
+1. Download `dist/GeometricalOS.iso`.
+2. Open Rufus 4. The empty window may say **MBR** and **BIOS or UEFI-CSM**. That changes after you select the ISO.
+3. **SELECT** `GeometricalOS.iso`.
+4. If Rufus asks about the write mode, choose **ISO Image mode** (the one that formats the stick). DD Image mode also boots, but it does not turn the rest of the 64 GB into a usable drive.
+5. Use these settings. They match a 64 GB stick:
+   - Partition scheme: **GPT**
+   - Target system: **UEFI (non CSM)**
+   - File system: **Large FAT32** (this is the option Rufus offers above 32 GB)
+   - Cluster size: **4096 bytes**. A 64 KB cluster size makes this HP firmware report that the boot device failed.
+6. **START** and accept the prompts. Rufus formats the whole stick and copies `\EFI\BOOT\BOOTX64.EFI`. The file is a few hundred kilobytes, so the 32 KB clusters and the 4 GB FAT32 file limit are not a problem.
+7. Shut Windows all the way down. Insert the stick, power on, and tap **Esc**, then **F9**, and choose the USB device. Leave Windows Boot Manager as the default. With the stick unplugged, the computer boots Windows as before.
+8. At Setup, enter a name. When it says no IDE disk was found, press **Enter** for **Start**. Do not look for an Install button on this computer. There is nothing here for Setup to partition.
+9. To go back to Windows, choose **Exit** or shut down, remove the stick if you want, and power on normally.
+
+A CD burned from the same ISO boots on UEFI and on BIOS. VirtualBox is unchanged: keep the IDE disk and the CD on the secondary master, and use Install there.
+
 ## Try it in VirtualBox on Windows 11
 
 You do not have to build anything. Use `dist/GeometricalOS.iso`.
@@ -188,11 +210,11 @@ Start the VM to boot the embedded installer ISO into Setup. Click inside the VM 
 
 ## Build it yourself (Linux or WSL)
 
-You need `nasm`, `gcc` with 32-bit support (`gcc-multilib`), `genisoimage`, `make`, and `python3`.
+You need `nasm`, `gcc` with 32-bit support (`gcc-multilib`), `xorriso`, `mingw-w64` for the 64-bit UEFI loader, `mtools`, `dosfstools`, `make`, and `python3`.
 
 ```bash
 sudo apt update
-sudo apt install -y nasm gcc-multilib genisoimage make python3
+sudo apt install -y nasm gcc-multilib xorriso gcc-mingw-w64-x86-64 mtools dosfstools make python3
 make
 ```
 
@@ -227,4 +249,4 @@ The same IDE layout VirtualBox uses was tested with QEMU: hard disk on the prima
 
 ## Limits
 
-No networking or Internet access is implemented. One IDE disk, no USB, and no sound card besides Sound Blaster 16 and the PC speaker. Items in the Recycle Bin continue to use disk space until the bin is emptied.
+The installer only writes an IDE primary master. It does not see NVMe or SATA, so a Windows SSD is left as it is. A USB stick of any size, including 64 GB, can boot the system through UEFI; xHCI keyboards and mice are polled when the controller is visible. Sound is Sound Blaster 16 or the PC speaker. Items in the Recycle Bin continue to use disk space until the bin is emptied. The temporary desktop started from USB keeps its files in memory only.
