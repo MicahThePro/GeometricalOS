@@ -57,6 +57,7 @@ static HidEp *eps;
 static int ep_count;
 static char status_line[48] = "No USB chip";
 static int saw_ctl, saw_ports, saw_devs, saw_hubs, last_err, last_code;
+static int last_ep_state = -1, last_dq = -1, last_events;
 
 const char *xhci_status_line(void) { return status_line; }
 
@@ -114,6 +115,16 @@ static void note_status(void) {
         p = put_u(p, end, e);
         p = put_s(p, end, " c");
         p = put_u(p, end, last_code);
+        if (last_ep_state >= 0) {
+            p = put_s(p, end, " s");
+            p = put_u(p, end, last_ep_state);
+        }
+        if (last_dq >= 0) {
+            p = put_s(p, end, " q");
+            p = put_u(p, end, last_dq);
+        }
+        p = put_s(p, end, " v");
+        p = put_u(p, end, last_events);
     }
     *p = 0;
     set_status(text);
@@ -121,6 +132,7 @@ static void note_status(void) {
 
 static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, int parent_slot,
                             int parent_port, uint32_t slots, int depth, int hub_mtt, int think);
+static uint8_t *ctx_at(Ctrl *hc, uint8_t *base, int index);
 
 static void *halloc(uint32_t size, uint32_t align) {
     uint32_t a = (heap_used + align - 1u) & ~(align - 1u);
@@ -138,15 +150,27 @@ static void wr64(volatile uint32_t *r, uint32_t low) {
     r[1] = 0;
 }
 
+static uint16_t pit_now(void) {
+    outb(0x43, 0x00);
+    uint16_t lo = inb(0x40);
+    uint16_t hi = inb(0x40);
+    return (uint16_t)((hi << 8) | lo);
+}
+
+/* One PIT period is 10 ms. Count the counter down instead of trusting the
+ * tick total, which can run ahead and make a USB timeout return immediately. */
 static void wait_ms(int ms) {
-    uint32_t need = (uint32_t)(ms / 10);
-    if (!need) need = 1;
-    uint32_t start = timer_ticks();
-    for (uint32_t spin = 0; spin < need * 80000u; spin++) {
-        input_timer();
-        if (timer_ticks() - start >= need) break;
+    int slices = ms / 10;
+    if (slices < 1) slices = 1;
+    for (int s = 0; s < slices; s++) {
+        uint16_t start = pit_now();
+        for (int i = 0; i < 400000; i++) {
+            uint16_t now = pit_now();
+            if (now > start) break;
+            if ((uint16_t)(start - now) > 11000) break;
+        }
+        input_idle();
     }
-    input_idle();
 }
 
 static int ring_init(Ring *r, uint32_t n, int with_link) {
@@ -287,32 +311,62 @@ static int control(Ctrl *hc, Ring *ep0, int slot, uint8_t bm, uint8_t req, uint1
     setup->d[3] = (setup->d[3] & ~1u) | saved;
     flush_range(setup, sizeof(*setup));
     doorbell(hc, slot, 1);
-    uint32_t want = (uint32_t)(uintptr_t)status;
-    uint32_t data_ptr = data_trb ? (uint32_t)(uintptr_t)data_trb : 0;
-    for (int i = 0; i < 80; i++) {
+    uint32_t setup_ptr = (uint32_t)(uintptr_t)setup & ~0xFu;
+    uint32_t status_ptr = (uint32_t)(uintptr_t)status & ~0xFu;
+    uint32_t data_ptr = data_trb ? ((uint32_t)(uintptr_t)data_trb & ~0xFu) : 0;
+    int events = 0;
+    for (int i = 0; i < 100; i++) {
         Trb ev;
-        if (!event_poll(hc, &ev)) {
-            wait_ms(5);
-            continue;
+        while (event_poll(hc, &ev)) {
+            events++;
+            uint32_t type = (ev.d[3] >> 10) & 0x3Fu;
+            if (type != 32) continue;
+            uint32_t got = ev.d[2] >> 24;
+            uint32_t ptr = ev.d[0] & ~0xFu;
+            uint32_t epid = (ev.d[3] >> 16) & 0x1Fu;
+            uint32_t eslot = ev.d[3] >> 24;
+            int ptr_hit = ptr == setup_ptr || ptr == status_ptr || (data_ptr && ptr == data_ptr);
+            int id_hit = eslot == (uint32_t)slot && epid == 1;
+            if (!ptr_hit && !id_hit) continue;
+            last_code = (int)got;
+            last_events = events;
+            if (code) *code = got;
+            /* A short data packet is followed by the status event. */
+            if (got == 13 && data_ptr && ptr == data_ptr) continue;
+            if (got == 1 || got == 13) {
+                if (dir_in && data && len) flush_range(data, len);
+                return 0;
+            }
+            recover_ep0(hc, ep0, slot);
+            return -1;
         }
-        uint32_t type = (ev.d[3] >> 10) & 0x3Fu;
-        if (type != 32) continue;
-        uint32_t got = ev.d[2] >> 24;
-        if (data_ptr && ev.d[0] == data_ptr && ev.d[0] != want) {
-            if (got == 1 || got == 13) continue;
-        }
-        if (ev.d[0] != want) continue;
-        if (code) *code = got;
-        last_code = (int)got;
-        if ((got == 1 || got == 13) && dir_in && data && len) flush_range(data, len);
-        if (got == 1 || got == 13) return 0;
-        recover_ep0(hc, ep0, slot);
-        return -1;
+        wait_ms(10);
     }
     if (code) *code = 0;
     last_code = 0;
+    last_events = events;
     recover_ep0(hc, ep0, slot);
     return -1;
+}
+
+/* Address Device leaves the controller's dequeue pointer wherever it finished
+ * SET_ADDRESS. Continuing at the start of the ring makes the read time out. */
+static void follow_ep0(Ctrl *hc, Ring *ep0, uint8_t *output) {
+    uint8_t *ctx = ctx_at(hc, output, 1);
+    flush_range(ctx, hc->ctx_size);
+    uint32_t *od = (uint32_t *)ctx;
+    uint32_t raw = od[2];
+    uintptr_t ptr = raw & ~0xFu;
+    uintptr_t base = (uintptr_t)ep0->trb;
+    uintptr_t end = base + (uintptr_t)ep0->size * sizeof(Trb);
+    last_ep_state = (int)(od[0] & 7u);
+    if (ptr < base || ptr >= end) {
+        last_dq = -1;
+        return;
+    }
+    ep0->enqueue = (uint32_t)((ptr - base) / sizeof(Trb));
+    ep0->cycle = raw & 1u;
+    last_dq = (int)ep0->enqueue;
 }
 
 static void bios_handoff(Ctrl *hc) {
@@ -331,7 +385,6 @@ static void bios_handoff(Ctrl *hc) {
                 wait_ms(10);
             }
             wr(ext + 1, 0x0000FFFFu);
-            serial_write("XHCI: ownership\n");
             return;
         }
         if (!next) return;
@@ -523,10 +576,7 @@ static int enumerate_hub(Ctrl *hc, Ring *ep0, int hub_slot, int root_port, uint3
     uint8_t *hub = halloc(16, 64);
     uint8_t *st = halloc(8, 64);
     if (!hub || !st) return -1;
-    if (control(hc, ep0, hub_slot, 0xA0, 6, 0x2900, 0, hub, 9, 1, &code)) {
-        serial_write("XHCI: hub descriptor failed\n");
-        return -1;
-    }
+    if (control(hc, ep0, hub_slot, 0xA0, 6, 0x2900, 0, hub, 9, 1, &code)) return -1;
     int ports = hub[2];
     int think = (hub[3] >> 5) & 3;
     if (ports > 15) ports = 15;
@@ -626,6 +676,7 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
         rc = -4;
         goto fail;
     }
+    follow_ep0(hc, &ep0, output);
 
     memset(desc, 0, 18);
     static const uint32_t try_mps[] = {8, 64, 512};

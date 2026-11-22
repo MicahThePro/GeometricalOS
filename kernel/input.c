@@ -349,7 +349,9 @@ static void ps2_drain(void) {
         uint8_t st = inb(0x64);
         if (st == 0xFF || !(st & 1)) break;
         uint8_t d = inb(0x60);
-        byte_count++;
+        /* 0xFA and 0xAA are command replies, not keys. */
+        if (d != 0xFA && d != 0xAA && d != 0xFE)
+            byte_count++;
         if (st & 0x20) mouse_feed(d);
         else kbd_feed(d);
     }
@@ -364,6 +366,8 @@ void input_init(void) {
     pit_init();
     ps2_bringup();
     xhci_init();
+    /* Resetting the USB ports can silence the keyboard controller. */
+    ps2_bringup();
     if (ps2_acked) xhci_append_status(" ps2");
 }
 
