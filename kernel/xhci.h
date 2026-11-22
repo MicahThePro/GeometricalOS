@@ -23,6 +23,8 @@ typedef struct {
 int xhci_handoff_count(void);
 int xhci_usb_count(void);
 const char *xhci_usb_line(int index);
+/* USBSTS, CRCR, the first command's completion, and whether it timed out. */
+const char *xhci_cmd_line(int bus, int dev, int fn);
 const XhciHandoff *xhci_handoff_at(int index);
 const char *xhci_status_line(void);
 void xhci_set_status_line(const char *text);
