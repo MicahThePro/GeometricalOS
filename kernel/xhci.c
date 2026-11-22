@@ -57,7 +57,7 @@ static HidEp *eps;
 static int ep_count;
 static char status_line[48] = "No USB chip";
 static int saw_ctl, saw_ports, saw_devs, saw_hubs, last_err, last_code;
-static int last_ep_state = -1, last_dq = -1, last_events;
+static int last_ep_state = -1, last_dq = -1, last_events, last_speed = -1;
 
 const char *xhci_status_line(void) { return status_line; }
 
@@ -125,6 +125,10 @@ static void note_status(void) {
         }
         p = put_s(p, end, " v");
         p = put_u(p, end, last_events);
+        if (last_speed >= 0) {
+            p = put_s(p, end, " z");
+            p = put_u(p, end, last_speed);
+        }
     }
     *p = 0;
     set_status(text);
@@ -303,7 +307,7 @@ static int control(Ctrl *hc, Ring *ep0, int slot, uint8_t bm, uint8_t req, uint1
     Trb *data_trb = 0;
     if (len) {
         flush_range(data, len);
-        uint32_t dir = dir_in ? ((1u << 16) | (1u << 2)) : 0;
+        uint32_t dir = dir_in ? (1u << 16) : 0;
         data_trb = ring_write(ep0, (uint32_t)(uintptr_t)data, 0, len, (3u << 10) | dir, 1);
     }
     Trb *status = ring_write(ep0, 0, 0, 0,
@@ -677,11 +681,24 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
         goto fail;
     }
     follow_ep0(hc, &ep0, output);
+    /* A transaction error leaves the endpoint halted. The device also needs
+     * a moment after SET_ADDRESS before it answers the next request. */
+    if (last_ep_state >= 2)
+        recover_ep0(hc, &ep0, (int)slot);
+    wait_ms(50);
+    last_speed = speed;
 
     memset(desc, 0, 18);
     static const uint32_t try_mps[] = {8, 64, 512};
     int got_desc = 0;
-    if (!control(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code)) got_desc = 1;
+    for (int attempt = 0; attempt < 3 && !got_desc; attempt++) {
+        if (attempt) {
+            recover_ep0(hc, &ep0, (int)slot);
+            wait_ms(20);
+        }
+        if (!control(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code))
+            got_desc = 1;
+    }
     if (!got_desc) {
         for (int i = 0; i < 3; i++) {
             if (try_mps[i] == mps) continue;
@@ -922,6 +939,13 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
             if (seen & (1u << p)) continue;
             int speed = port_reset(hc, (int)p);
             if (speed < 1) continue;
+            /* A port that has dropped out of U0 still answers addressing,
+             * then fails the next transfer with a bus error. */
+            {
+                volatile uint32_t *psc = hc->op + (0x400 / 4) + (int)p * 4;
+                if (((rd(psc) >> 5) & 0xFu) != 0)
+                    wr(psc, (1u << 9) | (1u << 16));
+            }
             seen |= 1u << p;
             saw_devs++;
             serial_write("XHCI: port ");

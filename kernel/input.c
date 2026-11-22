@@ -320,15 +320,10 @@ static void ps2_bringup(void) {
     ps2_cmd(0xAD);
     ps2_cmd(0xA7);
     ps2_flush();
-    ps2_cmd(0x20);
-    int cfg = ps2_wait_byte(100000);
-    if (cfg < 0) cfg = 0x45;
-    cfg |= 0x01;          /* keyboard irq */
-    cfg |= 0x40;          /* translate set 2 into set 1 */
-    cfg &= ~0x10;         /* keyboard clock on */
-    cfg &= ~0x20;         /* mouse clock on */
+    /* Translation on, both clocks on, no IRQs. An unhandled IRQ stops this
+     * keyboard from sending the next byte. */
     ps2_cmd(0x60);
-    ps2_kbd((uint8_t)cfg);
+    ps2_kbd(0x44);
     ps2_cmd(0xAE);
     ps2_flush();
     ps2_kbd(0xFF);
