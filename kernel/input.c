@@ -313,8 +313,10 @@ static int ps2_keyboard_init(void) {
     return 1;
 }
 
-void input_post_scancode(uint8_t scancode) {
-    kbd_feed(scancode);
+void input_init(void) {
+    pit_init();
+    ps2_keyboard_init();
+    xhci_init();
 }
 
 void input_post_mouse(int dx, int dy, int buttons) {
@@ -342,10 +344,9 @@ static int ps2_chip(void) {
     return floating < 48;
 }
 
-void input_init(void) {
-    pit_init();
-    ps2_keyboard_init();
-    xhci_set_status_line("Listening");
+void input_post_scancode(uint8_t scancode) {
+    byte_count++;
+    kbd_feed(scancode);
 }
 
 void input_poll(void) {

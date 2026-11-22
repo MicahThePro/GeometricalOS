@@ -490,10 +490,22 @@ static int enumerate_device(int root_port, int speed, uint32_t route, int parent
     if (!desc) return -5;
     memset(desc, 0, 256);
     if (control(&ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code) || (code != 1 && code != 13)) {
-        serial_write("XHCI: desc code ");
-        serial_dec(code);
-        serial_write("\n");
-        return -5;
+        /* Full-speed devices need 8-byte packets. High-speed devices stall
+         * on that, so try the 64-byte size before giving up. */
+        ed[1] = (3u << 1) | (4u << 3) | (64u << 16);
+        cd[0] = 0;
+        cd[1] = 1u << 1;
+        Trb *eval = ring_push(&cmd, (uint32_t)(uintptr_t)input, 0, 0, (13u << 10) | (slot << 24));
+        doorbell(0, 0);
+        wait_event(33, (uint32_t)(uintptr_t)eval, &code, 0);
+        if (control(&ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code) || (code != 1 && code != 13)) {
+            serial_write("XHCI: desc code ");
+            serial_dec(code);
+            serial_write("\n");
+            last_err = -5;
+            return -5;
+        }
+        mps = 64;
     }
     uint32_t packet = desc[7];
     if (speed >= 4 && packet == 9) packet = 512;
@@ -619,7 +631,8 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
         serial_write("XHCI: page size\n");
         return -3;
     }
-    uint32_t scratch = (((hcs2 >> 27) & 0x1Fu) << 5) | ((hcs2 >> 21) & 0x1Fu);
+    /* The high and low scratchpad fields are swapped in the register. */
+    uint32_t scratch = ((hcs2 >> 16) & 0x3E0u) | ((hcs2 >> 27) & 0x1Fu);
     dcbaa = halloc((slots + 1u) * 8u, 64);
     if (!dcbaa) return -4;
     memset(dcbaa, 0, (slots + 1u) * 8u);
