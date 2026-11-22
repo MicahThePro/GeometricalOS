@@ -86,7 +86,7 @@ $(BUILD)/mbr.bin: boot/mbr.asm | $(BUILD)
 $(BUILD)/mbr_embed.c: $(BUILD)/mbr.bin tools/bin2c.py
 	$(PYTHON) tools/bin2c.py $(BUILD)/mbr.bin $@ mbr_template
 
-$(BUILD)/%.o: kernel/%.c | $(BUILD)
+$(BUILD)/%.o: kernel/%.c kernel/buildid.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/stb_image.o: kernel/stb_image.c | $(BUILD)

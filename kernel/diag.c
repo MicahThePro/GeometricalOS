@@ -39,6 +39,14 @@ static void put_hex16(char *dst, int *n, uint32_t v) {
     dst[(*n)++] = hex[v & 0xF];
 }
 
+static void put_hex4(char *dst, int *n, uint32_t v) {
+    static const char hex[] = "0123456789ABCDEF";
+    dst[(*n)++] = hex[(v >> 12) & 0xF];
+    dst[(*n)++] = hex[(v >> 8) & 0xF];
+    dst[(*n)++] = hex[(v >> 4) & 0xF];
+    dst[(*n)++] = hex[v & 0xF];
+}
+
 static void put_dec(char *dst, int *n, uint32_t v) {
     char rev[12];
     int r = 0;
@@ -212,9 +220,9 @@ static void describe_controller(int index, int bus, int dev, int fn) {
     line[n++] = '.';
     line[n++] = (char)('0' + (fn & 7));
     line[n++] = ' ';
-    put_hex16(line, &n, id & 0xFFFF);
+    put_hex4(line, &n, id & 0xFFFF);
     line[n++] = ':';
-    put_hex16(line, &n, id >> 16);
+    put_hex4(line, &n, id >> 16);
     line[n++] = ' ';
     line[n++] = 'B';
     line[n++] = 'A';
@@ -448,6 +456,10 @@ static void collect_memory(void) {
     put_hex8(line, &n, bi->largest_base);
     line[n++] = '+';
     put_dec(line, &n, bi->largest_pages / 256u);
+    line[n++] = 'M';
+    p = " hi ";
+    while (*p) line[n++] = *p++;
+    put_dec(line, &n, bi->high_pages / 256u);
     line[n++] = 'M';
     line[n] = 0;
     add_line(line);

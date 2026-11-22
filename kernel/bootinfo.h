@@ -41,7 +41,12 @@ typedef struct {
     uint32_t largest_pages;
     uint32_t overlap_mask;
     char fw_vendor[64];
+    /* Usable pages whose region starts at or above 4 GB. Zero on BIOS. */
+    uint32_t high_pages;
 } BootInfo;
+
+typedef char bootinfo_high_ok[(__builtin_offsetof(BootInfo, high_pages) == 180) ? 1 : -1];
+typedef char bootinfo_fits[(sizeof(BootInfo) <= 256) ? 1 : -1];
 
 static inline const BootInfo *bootinfo(void) {
     return (const BootInfo *)BOOTINFO_ADDR;

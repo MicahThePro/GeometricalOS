@@ -316,7 +316,7 @@ static void say(EfiSystemTable *st, const char *s) {
 static uint8_t mapbuf[48 * 1024];
 static char fw_vendor_tmp[64];
 static uint32_t fw_rev_tmp, gop_mode_tmp;
-static uint32_t mem_usable, mem_big_base, mem_big_pages, mem_overlap;
+static uint32_t mem_usable, mem_big_base, mem_big_pages, mem_overlap, mem_high_pages;
 
 static void copy_vendor(uint16_t *src) {
     int i = 0;
@@ -345,6 +345,7 @@ static void note_memory(uintn map_size, uintn desc_size) {
     mem_usable = 0;
     mem_big_base = 0;
     mem_big_pages = 0;
+    mem_high_pages = 0;
     mem_overlap = 0x3FFu;
     if (!desc_size) return;
     for (uintn off = 0; off + sizeof(EfiMemDesc) <= map_size; off += desc_size) {
@@ -352,8 +353,14 @@ static void note_memory(uintn map_size, uintn desc_size) {
         int ok = mem_type_usable(d->type);
         uint64_t start = d->physical;
         uint64_t end = start + d->pages * 4096ULL;
-        if (ok && start < 0x100000000ULL) {
+        if (ok) {
             mem_usable++;
+            if (start >= 0x100000000ULL) {
+                uint64_t add = d->pages;
+                if (add > 0xFFFFFFFFu - mem_high_pages) mem_high_pages = 0xFFFFFFFFu;
+                else mem_high_pages += (uint32_t)add;
+                continue;
+            }
             uint64_t clip = end > 0x100000000ULL ? 0x100000000ULL : end;
             uint64_t bytes = clip > start ? clip - start : 0;
             if (bytes / 4096ULL > mem_big_pages) {
@@ -577,6 +584,7 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
     info[27] = mem_big_pages;
     info[28] = mem_overlap;
     for (int i = 0; i < 64; i++) ((char *)(info + 29))[i] = fw_vendor_tmp[i];
+    info[45] = mem_high_pages;
 
     uint8_t *gdt = (uint8_t *)0x7C00;
     memset(gdt, 0, 64);
