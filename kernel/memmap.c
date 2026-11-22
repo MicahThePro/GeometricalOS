@@ -28,6 +28,7 @@ static int protected_hit(uint64_t start, uint64_t end) {
     static const uint32_t fixed[][2] = {
         {0x6000u, 0x8000u},
         {0x10000u, 0x81000u},
+        {0x81000u, 0x85000u},
         {0x8C000u, 0x91000u},
         {0x1800000u, 0x1808000u},
     };

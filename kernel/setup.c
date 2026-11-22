@@ -721,7 +721,7 @@ int run_setup(void) {
         int c = 0;
         while (!c) {
             c = poll_choice("Continue", "Exit");
-            if (!diag_offered && input_byte_count() == 0 &&
+            if (!diag_offered && !diag_was_shown() && input_byte_count() == 0 &&
                 (uint32_t)(timer_ticks() - welcome_at) >= 500u) {
                 diag_offered = 1;
                 diag_run();
