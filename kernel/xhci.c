@@ -967,6 +967,12 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
 }
 
 void xhci_init(void) {
+    /* Resetting this controller turns off the firmware keyboard. The laptop
+     * keys arrive through that firmware path, and our own device reads still
+     * fail with a bus error. Leave the controller running. */
+    set_status("USB firmware");
+    serial_write("XHCI: firmware keyboard\n");
+    return;
     ctrl_count = 0;
     ep_count = 0;
     saw_ctl = saw_ports = saw_devs = saw_hubs = last_err = last_code = 0;

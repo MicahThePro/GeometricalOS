@@ -300,9 +300,8 @@ static int ps2_acked;
 static uint32_t ps2_retry_at;
 static int ps2_retries;
 
-/* HP's firmware leaves the keyboard clock off. Turn the port back on,
- * reset the keyboard, then tell it to scan. Do this before USB setup so a
- * key pressed during enumeration is still waiting afterwards. */
+/* The firmware is already translating keystrokes. Disabling the port or
+ * resetting it stops that stream, so only ask the keyboard to scan. */
 static void ps2_bringup(void) {
     int floating = 0;
     for (int i = 0; i < 16; i++) if (inb(0x64) == 0xFF) floating++;
@@ -317,25 +316,10 @@ static void ps2_bringup(void) {
         serial_write("KBD: no controller\n");
         return;
     }
-    ps2_cmd(0xAD);
-    ps2_cmd(0xA7);
-    ps2_flush();
-    /* Translation on, both clocks on, no IRQs. An unhandled IRQ stops this
-     * keyboard from sending the next byte. */
-    ps2_cmd(0x60);
-    ps2_kbd(0x44);
-    ps2_cmd(0xAE);
-    ps2_flush();
-    ps2_kbd(0xFF);
-    int reset = ps2_collect(0xFA, 0xAA, 8, 400000);
     ps2_kbd(0xF4);
     ps2_acked = ps2_collect(0xFA, 0xFA, 4, 200000);
-    ps2_cmd(0xA8);
     ps2_cmd(0xD4);
     ps2_kbd(0xF4);
-    ps2_collect(0xFA, 0xFA, 2, 50000);
-    ps2_flush();
-    serial_write(reset ? "KBD: reset\n" : "KBD: no reset\n");
     serial_write(ps2_acked ? "KBD: scanning\n" : "KBD: no ack\n");
 }
 
@@ -361,8 +345,6 @@ void input_init(void) {
     pit_init();
     ps2_bringup();
     xhci_init();
-    /* Resetting the USB ports can silence the keyboard controller. */
-    ps2_bringup();
     if (ps2_acked) xhci_append_status(" ps2");
 }
 
