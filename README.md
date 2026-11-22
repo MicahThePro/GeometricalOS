@@ -39,7 +39,7 @@ This is a second boot choice next to Windows. GeometricalOS does not install ont
 
 The Omen (Ryzen 7 8745HX) boots with UEFI. Secure Boot has to be off, because this loader is not signed by Microsoft.
 
-1. Download `dist/GeometricalOS.iso`.
+1. Download the `GeometricalOS-iso` artifact from that commit's GitHub Actions run. The copy of `dist/GeometricalOS.iso` that used to live in the repository is not the build to flash. The first yellow line on Setup is `BUILD`, the 12-character commit hash, and that commit's UTC time. Any other line means the stick is an older build.
 2. Open Rufus 4. The empty window may say **MBR** and **BIOS or UEFI-CSM**. That changes after you select the ISO.
 3. **SELECT** `GeometricalOS.iso`.
 4. If Rufus asks about the write mode, choose **ISO Image mode** (the one that formats the stick). DD Image mode also boots, but it does not turn the rest of the 64 GB into a usable drive.
@@ -70,7 +70,7 @@ A CD burned from the same ISO boots on UEFI and on BIOS. VirtualBox is unchanged
 
 ## Try it in VirtualBox on Windows 11
 
-You do not have to build anything. Use `dist/GeometricalOS.iso`.
+You do not have to build anything. Use the `GeometricalOS-iso` artifact from the commit you intend to boot. The first yellow line on Setup has to match that commit.
 
 1. Install [VirtualBox](https://www.virtualbox.org/) for Windows.
 2. Click **New**.
@@ -231,7 +231,7 @@ sudo apt install -y nasm gcc-multilib xorriso gcc-mingw-w64-x86-64 mtools dosfst
 make
 ```
 
-`make` writes `dist/GeometricalOS.iso`. `make run` boots that ISO in QEMU. `make clean` deletes the build files.
+`make` writes `dist/GeometricalOS.iso` on your machine. `make run` boots that ISO in QEMU. `make clean` deletes the build files. The file is not stored in git. GitHub Actions uploads it as `GeometricalOS-iso`.
 
 The kernel is freestanding C and NASM. It enters 32-bit protected mode, sets a VESA graphics mode (it prefers 1280×720 when available), and does not use the Linux kernel or GRUB.
 
