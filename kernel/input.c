@@ -97,6 +97,34 @@ static void mouse_push(int type) {
 static uint32_t byte_count;
 uint32_t input_byte_count(void) { return byte_count; }
 
+#define PS2_LOG 48
+static uint8_t ps2_log_st[PS2_LOG];
+static uint8_t ps2_log_dt[PS2_LOG];
+static int ps2_log_n, ps2_log_w;
+static uint32_t ps2_kbd_bytes, ps2_aux_bytes, usb_kbd_packets, usb_mouse_packets;
+
+uint32_t input_ps2_kbd_bytes(void) { return ps2_kbd_bytes; }
+uint32_t input_ps2_aux_bytes(void) { return ps2_aux_bytes; }
+uint32_t input_usb_kbd_packets(void) { return usb_kbd_packets; }
+uint32_t input_usb_mouse_packets(void) { return usb_mouse_packets; }
+int input_ps2_log_count(void) { return ps2_log_n; }
+
+void input_note_ps2(uint8_t status, uint8_t data) {
+    ps2_log_st[ps2_log_w] = status;
+    ps2_log_dt[ps2_log_w] = data;
+    ps2_log_w = (ps2_log_w + 1) % PS2_LOG;
+    if (ps2_log_n < PS2_LOG) ps2_log_n++;
+    if (status & 0x20) ps2_aux_bytes++;
+    else ps2_kbd_bytes++;
+}
+
+void input_ps2_log_get(int newest, uint8_t *status, uint8_t *data) {
+    int i = ps2_log_w - 1 - newest;
+    while (i < 0) i += PS2_LOG;
+    if (status) *status = ps2_log_st[i];
+    if (data) *data = ps2_log_dt[i];
+}
+
 static uint8_t set2_to_set1(uint8_t c) {
     switch (c) {
     case 0x1C: return 0x1E; case 0x32: return 0x30; case 0x21: return 0x2E;
@@ -328,6 +356,7 @@ static void ps2_drain(void) {
         uint8_t st = inb(0x64);
         if (st == 0xFF || !(st & 1)) break;
         uint8_t d = inb(0x60);
+        input_note_ps2(st, d);
         /* 0xFA and 0xAA are command replies, not keys. */
         if (d != 0xFA && d != 0xAA && d != 0xFE)
             byte_count++;
@@ -349,6 +378,7 @@ void input_init(void) {
 }
 
 void input_post_mouse(int dx, int dy, int buttons) {
+    usb_mouse_packets++;
     if (dx > 40) dx = 40;
     if (dx < -40) dx = -40;
     if (dy > 40) dy = 40;
@@ -368,6 +398,7 @@ void input_post_mouse(int dx, int dy, int buttons) {
 }
 
 void input_post_scancode(uint8_t scancode) {
+    usb_kbd_packets++;
     byte_count++;
     kbd_feed(scancode);
 }

@@ -314,6 +314,61 @@ static void say(EfiSystemTable *st, const char *s) {
 }
 
 static uint8_t mapbuf[48 * 1024];
+static char fw_vendor_tmp[64];
+static uint32_t fw_rev_tmp, gop_mode_tmp;
+static uint32_t mem_usable, mem_big_base, mem_big_pages, mem_overlap;
+
+static void copy_vendor(uint16_t *src) {
+    int i = 0;
+    if (!src) {
+        fw_vendor_tmp[0] = 0;
+        return;
+    }
+    for (; src[i] && i < 63; i++) {
+        uint16_t c = src[i];
+        fw_vendor_tmp[i] = (c >= 32 && c < 127) ? (char)c : '?';
+    }
+    fw_vendor_tmp[i] = 0;
+}
+
+static int mem_type_usable(uint32_t type) {
+    return type == 1 || type == 2 || type == 3 || type == 4 || type == 7;
+}
+
+static void note_memory(uintn map_size, uintn desc_size) {
+    static const uint32_t watch[10] = {
+        0x6000u, 0x7000u, 0x7C00u, 0x10000u, 0x12000u,
+        0x80000u, 0x90000u, 0x800000u, 0x1800000u, 0x1100000u
+    };
+    uint8_t hit[10];
+    for (int i = 0; i < 10; i++) hit[i] = 0;
+    mem_usable = 0;
+    mem_big_base = 0;
+    mem_big_pages = 0;
+    mem_overlap = 0x3FFu;
+    if (!desc_size) return;
+    for (uintn off = 0; off + sizeof(EfiMemDesc) <= map_size; off += desc_size) {
+        EfiMemDesc *d = (EfiMemDesc *)(mapbuf + off);
+        int ok = mem_type_usable(d->type);
+        uint64_t start = d->physical;
+        uint64_t end = start + d->pages * 4096ULL;
+        if (ok && start < 0x100000000ULL) {
+            mem_usable++;
+            uint64_t clip = end > 0x100000000ULL ? 0x100000000ULL : end;
+            uint64_t bytes = clip > start ? clip - start : 0;
+            if (bytes / 4096ULL > mem_big_pages) {
+                mem_big_base = (uint32_t)start;
+                mem_big_pages = (uint32_t)(bytes / 4096ULL);
+            }
+        }
+        for (int i = 0; i < 10; i++) {
+            uint64_t addr = watch[i];
+            if (ok && addr >= start && addr < end) hit[i] = 1;
+        }
+    }
+    mem_overlap = 0;
+    for (int i = 0; i < 10; i++) if (!hit[i]) mem_overlap |= 1u << i;
+}
 
 static uint32_t save_boot_file(efi_handle image, EfiBootServices *bs) {
     static uint8_t li_guid[16] = {
@@ -361,6 +416,8 @@ static uint32_t save_boot_file(efi_handle image, EfiBootServices *bs) {
 efi_status efi_main(efi_handle image, EfiSystemTable *st) {
     serial_init();
     sputs("\nEFI: GeometricalOS\n");
+    fw_rev_tmp = st->firmware_revision;
+    copy_vendor(st->firmware_vendor);
     EfiBootServices *bs = st->boot;
     if (bs->set_watchdog) bs->set_watchdog(0, 0, 0, 0);
 
@@ -406,6 +463,7 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
         say(st, "GeometricalOS: the display has no framebuffer.\r\n");
         return 4;
     }
+    gop_mode_tmp = gm->mode;
     uint32_t width = gm->info->width ? gm->info->width : best_w;
     uint32_t height = gm->info->height ? gm->info->height : best_h;
     uint32_t format = gm->info->format;
@@ -444,6 +502,7 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
             if (end > 0x100000000ULL) end = 0x100000000ULL;
             mem_bytes += end - d->physical;
         }
+        note_memory(map_size, desc_size);
     }
     uint32_t ext_kb = (uint32_t)(mem_bytes / 1024ULL);
     if (ext_kb < 65536) ext_kb = 65536;
@@ -511,6 +570,13 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
     info[20] = saved_efi;
     info[21] = nvme;
     info[22] = have_nvme ? (0x80000000u | ((uint32_t)nbus << 16) | ((uint32_t)ndev << 8) | (uint32_t)nfn) : 0;
+    info[23] = fw_rev_tmp;
+    info[24] = gop_mode_tmp;
+    info[25] = mem_usable;
+    info[26] = mem_big_base;
+    info[27] = mem_big_pages;
+    info[28] = mem_overlap;
+    for (int i = 0; i < 64; i++) ((char *)(info + 29))[i] = fw_vendor_tmp[i];
 
     uint8_t *gdt = (uint8_t *)0x7C00;
     memset(gdt, 0, 64);

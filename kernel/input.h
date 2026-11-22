@@ -57,6 +57,13 @@ int input_key(KeyEvent *ev);
 int input_mouse(MouseEvent *ev);
 uint32_t timer_ticks(void);
 uint32_t input_byte_count(void);
+uint32_t input_ps2_kbd_bytes(void);
+uint32_t input_ps2_aux_bytes(void);
+uint32_t input_usb_kbd_packets(void);
+uint32_t input_usb_mouse_packets(void);
+int input_ps2_log_count(void);
+void input_ps2_log_get(int newest, uint8_t *status, uint8_t *data);
+void input_note_ps2(uint8_t status, uint8_t data);
 
 extern int mouse_x;
 extern int mouse_y;

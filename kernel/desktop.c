@@ -7,6 +7,7 @@
 #include "sound.h"
 #include "wallpaper.h"
 #include "settings.h"
+#include "diag.h"
 #include "serial.h"
 #include "fs.h"
 #include "version.h"
@@ -199,6 +200,7 @@ static void open_desktop_menu(int x, int y) {
 }
 
 static void desktop_draw(void) {
+    diag_draw_build_id(8, 4, gfx_width() >= 900 ? 2 : 1);
     int x = clamp_desktop_x(desktop_x);
     int y = clamp_desktop_y(desktop_y);
     refresh_desktop_files();
@@ -705,6 +707,7 @@ void splash_screen(void) {
     gfx_text_scaled(cx - tw / 2, cy + 40, name, COL_WHITE, scale);
     const char *ver = "Version " GOS_VERSION;
     gfx_text(cx - gfx_text_width(ver) / 2, cy + 48 + gfx_font_h() * scale, ver, COL_YELLOW, COL_NAVY);
+    diag_draw_build_id(8, 8, gfx_width() >= 900 ? 2 : 1);
     if (settings_safe_mode_active()) {
         const char *mode = "SAFE MODE";
         gfx_text(cx - gfx_text_width(mode) / 2, cy + 48 + gfx_font_h() * scale * 2,

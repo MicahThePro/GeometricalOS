@@ -33,6 +33,14 @@ typedef struct {
     uint32_t efi_file_size;
     uint32_t nvme_mmio;
     uint32_t nvme_pci;
+    /* Filled by the UEFI loader. Zero on a BIOS boot. */
+    uint32_t fw_revision;
+    uint32_t gop_mode;
+    uint32_t usable_regions;
+    uint32_t largest_base;
+    uint32_t largest_pages;
+    uint32_t overlap_mask;
+    char fw_vendor[64];
 } BootInfo;
 
 static inline const BootInfo *bootinfo(void) {
