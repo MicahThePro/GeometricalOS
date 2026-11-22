@@ -10,10 +10,13 @@ MINGW   := x86_64-w64-mingw32-gcc
 MINGWOBJ := x86_64-w64-mingw32-objcopy
 
 BUILD   := build
+BUILD_HASH := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+BUILD_UTC := $(shell TZ=UTC git log -1 --date=format:%Y%m%dT%H%M%SZ --format=%cd 2>/dev/null || echo unknown)
 CFLAGS  := -std=gnu11 -m32 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
            -fno-builtin -fno-asynchronous-unwind-tables -fno-unwind-tables \
            -mno-sse -mno-mmx -msoft-float -Os -Wall -Wextra \
-           -Wno-unused-parameter -Wno-unused-function -Ikernel
+           -Wno-unused-parameter -Wno-unused-function -Ikernel \
+           -DGOS_BUILD_HASH=\"$(BUILD_HASH)\" -DGOS_BUILD_UTC=\"$(BUILD_UTC)\"
 LDFLAGS := -m elf_i386 -T linker.ld -nostdlib --build-id=none
 LIBGCC  := $(shell $(CC) -m32 -print-libgcc-file-name)
 
@@ -26,7 +29,8 @@ C_SRCS := \
 	kernel/app_recycle.c kernel/app_write.c kernel/app_charmap.c kernel/app_cardfile.c kernel/app_recovery.c \
 	kernel/app_tools.c kernel/app_ftp.c \
 	kernel/sound.c kernel/wallpaper.c kernel/login.c kernel/font8x16_fallback.c \
-	kernel/desktop.c kernel/setup.c kernel/pci.c kernel/xhci.c kernel/nvme.c kernel/vmm.c \
+	kernel/desktop.c kernel/setup.c 	kernel/pci.c kernel/xhci.c kernel/nvme.c kernel/vmm.c \
+	kernel/memmap.c kernel/hpet.c kernel/acpi.c kernel/diag.c \
 	kernel/settings.c kernel/app_control.c kernel/app_player.c \
 	kernel/main.c
 
@@ -85,7 +89,7 @@ $(BUILD)/mbr.bin: boot/mbr.asm | $(BUILD)
 $(BUILD)/mbr_embed.c: $(BUILD)/mbr.bin tools/bin2c.py
 	$(PYTHON) tools/bin2c.py $(BUILD)/mbr.bin $@ mbr_template
 
-$(BUILD)/%.o: kernel/%.c | $(BUILD)
+$(BUILD)/%.o: kernel/%.c kernel/buildid.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/stb_image.o: kernel/stb_image.c | $(BUILD)

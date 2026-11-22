@@ -11,6 +11,7 @@
 #include "settings.h"
 #include "pci.h"
 #include "xhci.h"
+#include "diag.h"
 #include "nvme.h"
 
 static char acct_name[28] = "User";
@@ -374,6 +375,7 @@ static int do_install(const AtaDisk *disk) {
 
 static void draw_welcome(void) {
     frame("GeometricalOS Setup");
+    diag_draw_build_id(8, 6, gfx_width() >= 900 ? 2 : 1);
     line(34, "Welcome to Setup", COL_BLACK);
     line(58, "Enter continues. Exit restarts.", COL_NAVY);
     line(86, "Only an IDE disk can be erased,", COL_BLACK);
@@ -712,11 +714,19 @@ static int ask_line(const char *marker, const char *heading, const char *prompt,
 int run_setup(void) {
     sound_startup();
     serial_write("SETUP: WELCOME\n");
+    uint32_t welcome_at = timer_ticks();
+    int diag_offered = 0;
     for (;;) {
         draw_welcome();
         int c = 0;
         while (!c) {
             c = poll_choice("Continue", "Exit");
+            if (!diag_offered && input_byte_count() == 0 &&
+                (uint32_t)(timer_ticks() - welcome_at) >= 500u) {
+                diag_offered = 1;
+                diag_run();
+                draw_welcome();
+            }
             if (!c) {
                 cursor_restore();
                 cursor_draw(mouse_x, mouse_y);

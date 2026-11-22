@@ -3,6 +3,7 @@
 #include "gfx.h"
 #include "fs.h"
 #include "bootinfo.h"
+#include "memmap.h"
 #include "net.h"
 #include "input.h"
 #include "serial.h"
@@ -16,7 +17,7 @@
 #define FTP_REPLY_COUNT 8u
 #define FTP_REPLY_SIZE 128u
 #define FTP_CONNECT_TIMEOUT 3000u
-#define FTP_TRANSFER_BUFFER ((uint8_t *)FS_LARGE_BUFFER_ADDRESS)
+/* The transfer buffer is chosen in transfer_buffer_available(). */
 
 enum {
     FTP_XFER_NONE,
@@ -56,11 +57,11 @@ typedef struct {
 static FtpServer server;
 static uint16_t next_passive_port = FTP_PASSIVE_FIRST;
 
+static uint8_t *ftp_buffer;
+
 static int transfer_buffer_available(void) {
-    const BootInfo *info = bootinfo();
-    uint64_t memory_end = 0x100000ull + (uint64_t)info->ext_mem_kb * 1024u;
-    return info->magic == BOOTINFO_MAGIC &&
-           memory_end >= (uint64_t)FS_LARGE_BUFFER_ADDRESS + FS_MAX_FILE_BYTES;
+    if (!ftp_buffer) ftp_buffer = mem_buffer(FS_LARGE_BUFFER_ADDRESS, FS_MAX_FILE_BYTES);
+    return ftp_buffer != 0;
 }
 
 static void control_connected(int connection, void *context);
@@ -295,7 +296,7 @@ static void queue_size_reply(uint32_t size) {
 static void list_append(const char *name, uint32_t size, int machine) {
     uint32_t position = server.transfer_size;
     uint32_t capacity = FS_MAX_FILE_BYTES;
-    char *out = (char *)FTP_TRANSFER_BUFFER;
+    char *out = (char *)ftp_buffer;
     if (machine) {
         append_text(out, capacity, &position, "type=file;size=");
         append_uint(out, capacity, &position, size);
@@ -461,7 +462,7 @@ static void handle_retr(const char *name) {
         return;
     }
     uint32_t size = 0;
-    if (fs_read(inode, FTP_TRANSFER_BUFFER, FS_MAX_FILE_BYTES, &size) ||
+    if (fs_read(inode, ftp_buffer, FS_MAX_FILE_BYTES, &size) ||
         size != fs_size(inode)) {
         reply(451, "Could not read the requested file.");
         return;
@@ -703,7 +704,7 @@ static void data_bytes(int connection, const uint8_t *bytes, uint32_t length,
         server.upload_overflow = 1;
         return;
     }
-    memcpy(FTP_TRANSFER_BUFFER + server.transfer_size, bytes, length);
+    memcpy(ftp_buffer + server.transfer_size, bytes, length);
     server.transfer_size += length;
 }
 
@@ -711,7 +712,7 @@ static int commit_upload(void) {
     char temporary[28], backup[28];
     if (make_internal_name(".FTPU", ".TMP", temporary)) return -1;
     int temporary_inode = fs_write(server.directory, temporary,
-                                   FTP_TRANSFER_BUFFER, server.transfer_size);
+                                   ftp_buffer, server.transfer_size);
     if (temporary_inode < 0) return -2;
 
     int existing = fs_lookup(server.directory, server.transfer_name);
@@ -798,7 +799,7 @@ static void pump_download(void) {
         uint32_t count = server.transfer_size - server.transfer_position;
         if (count > 512u) count = 512u;
         if (!net_tcp_send(server.data,
-                          FTP_TRANSFER_BUFFER + server.transfer_position,
+                          ftp_buffer + server.transfer_position,
                           count))
             server.transfer_position += count;
         return;

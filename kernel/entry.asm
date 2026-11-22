@@ -20,3 +20,20 @@ _start:
     cli
     hlt
     jmp .hang
+
+global irq1_stub
+extern irq1_handler
+irq1_stub:
+    pushad
+    cld
+    call irq1_handler
+    popad
+    iret
+
+global irq_eoi_stub
+irq_eoi_stub:
+    push eax
+    mov al, 0x20
+    out 0x20, al
+    pop eax
+    iret

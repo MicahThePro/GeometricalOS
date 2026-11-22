@@ -4,6 +4,7 @@
 #include "gfx.h"
 #include "gui.h"
 #include "image_memory.h"
+#include "memmap.h"
 #include "serial.h"
 #include "string.h"
 #include "third_party/libwebp/src/webp/decode.h"
@@ -39,14 +40,15 @@ static int image_dimensions_ok(int width, int height) {
     return (uint64_t)(uint32_t)width * (uint32_t)height <= IMAGE_MAX_PIXELS;
 }
 
+static uint8_t *image_input;
+static uint8_t *image_output;
+
 static int image_memory_available(void) {
     const BootInfo *info = bootinfo();
     if (info->magic != BOOTINFO_MAGIC) return 0;
-    uint64_t memory_end = 0x100000ull + (uint64_t)info->ext_mem_kb * 1024u;
-    uint64_t required_end = (uint64_t)IMAGE_PIXELS_ADDRESS + IMAGE_RGBA_BYTES;
-    uint64_t input_end = (uint64_t)IMAGE_INPUT_ADDRESS + FS_MAX_FILE_BYTES;
-    if (input_end > required_end) required_end = input_end;
-    return memory_end >= required_end;
+    if (!image_input) image_input = mem_buffer(IMAGE_INPUT_ADDRESS, FS_MAX_FILE_BYTES);
+    if (!image_output) image_output = mem_buffer(IMAGE_PIXELS_ADDRESS, IMAGE_RGBA_BYTES);
+    return image_input && image_output;
 }
 
 static int decode_image(int inode, uint8_t **pixels, int *width, int *height) {
@@ -55,7 +57,7 @@ static int decode_image(int inode, uint8_t **pixels, int *width, int *height) {
 
     uint32_t file_size = fs_size(inode);
     if (file_size == 0 || file_size > FS_MAX_FILE_BYTES) return 0;
-    uint8_t *input = (uint8_t *)IMAGE_INPUT_ADDRESS;
+    uint8_t *input = image_input;
     uint32_t read_size = 0;
     if (fs_read(inode, input, FS_MAX_FILE_BYTES, &read_size) != 0 ||
         read_size != file_size)
@@ -63,7 +65,7 @@ static int decode_image(int inode, uint8_t **pixels, int *width, int *height) {
 
     image_memory_reset();
     int w = 0, h = 0;
-    uint8_t *output = (uint8_t *)IMAGE_PIXELS_ADDRESS;
+    uint8_t *output = image_output;
     if (format == 3) {
         if (!WebPGetInfo(input, (size_t)file_size, &w, &h) ||
             !image_dimensions_ok(w, h))

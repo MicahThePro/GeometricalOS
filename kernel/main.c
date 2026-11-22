@@ -12,6 +12,11 @@
 #include "recovery.h"
 #include "nvme.h"
 #include "gfx.h"
+#include "diag.h"
+#include "buildid.h"
+#include "memmap.h"
+#include "xhci.h"
+#include "acpi.h"
 
 #define BOOT_NOT_CHECKED (-100)
 
@@ -128,20 +133,28 @@ static int boot_console(const BootInfo *bi, const AtaDisk *disk,
     boot_line(6, "FILESYSTEM", value, fs_result == 0 ? COL_WHITE : COL_YELLOW);
 
     boot_line(7, "NEXT", next, COL_WHITE);
+    gfx_text(40, gfx_height() - 72,
+             "F8 opens recovery. D opens the hardware DIAG.",
+             COL_DKGRAY, COL_BLACK);
     gfx_text(40, gfx_height() - 52,
-             "F8 opens recovery  |  startup continues in 5 seconds.",
+             "Startup continues in 5 seconds.",
              COL_DKGRAY, COL_BLACK);
     gfx_present();
 
     /* Defer VMM display changes until the next screen can be painted. */
     uint32_t start = timer_ticks();
-    while ((uint32_t)(timer_ticks() - start) < 500u)
-        input_timer();
-
     int recovery = 0;
-    KeyEvent key;
-    while (input_key(&key))
-        if (key.code == KEY_F8) recovery = 1;
+    int open_diag = 0;
+    while ((uint32_t)(timer_ticks() - start) < 500u) {
+        input_poll();
+        KeyEvent key;
+        while (input_key(&key)) {
+            if (key.code == KEY_F8) recovery = 1;
+            if (key.code == 'd' || key.code == 'D') open_diag = 1;
+        }
+        if (open_diag) break;
+    }
+    if (open_diag) diag_run();
     MouseEvent mouse;
     while (input_mouse(&mouse)) {}
     return recovery;
@@ -165,7 +178,11 @@ static void halt_screen(const char *title, const char *a, const char *b) {
 void kmain(void) {
     cli_if();
     serial_init();
-    serial_write("\nGeometricalOS kernel\n");
+    serial_write("\nGeometricalOS kernel\nBUILD ");
+    serial_write(GOS_BUILD_HASH);
+    serial_write(" ");
+    serial_write(GOS_BUILD_UTC);
+    serial_write("\n");
     const BootInfo *bi = bootinfo();
     serial_write("magic ");
     serial_hex32(bi->magic);
@@ -187,6 +204,12 @@ void kmain(void) {
         serial_write("graphics init failed\n");
         for (;;) cli_if();
     }
+    /* Calibrate time, then take every xHCI controller away from firmware
+     * SMM before anything reads port 0x60 or 0x64. Enumeration stays off. */
+    timer_calibrate();
+    mem_selftest();
+    xhci_handoff_all();
+    acpi_bringup();
     input_init();
     if (bi->ext_mem_kb && bi->ext_mem_kb < 7000) {
         AtaDisk none;

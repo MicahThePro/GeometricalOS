@@ -10,6 +10,7 @@
 #include "wallpaper.h"
 #include "serial.h"
 #include "io.h"
+#include "diag.h"
 
 enum { BOOT_NORMAL, BOOT_SAFE };
 
@@ -84,15 +85,17 @@ int recovery_boot_menu(const BootInfo *bi, const AtaDisk *disk,
         "Restore last good settings",
         "Reset all settings to defaults",
         "View diagnostics",
+        "Hardware DIAG",
         "Restart computer"
     };
     static const char *fail_items[] = {
         "View diagnostics",
+        "Hardware DIAG",
         "Restart computer"
     };
     int selected = 0;
     for (;;) {
-        int count = fs_result == 0 ? 6 : 2;
+        int count = fs_result == 0 ? 7 : 3;
         const char **items = fs_result == 0 ? normal_items : fail_items;
         gfx_fill(0, 0, gfx_width(), gfx_height(), COL_SETUPBLUE);
         int x = (gfx_width() - 480) / 2;
@@ -127,6 +130,10 @@ int recovery_boot_menu(const BootInfo *bi, const AtaDisk *disk,
                         recovery_details(bi, disk, disk_result, fs_result);
                         break;
                     }
+                    if (selected == 1) {
+                        diag_run();
+                        break;
+                    }
                     reboot();
                 }
                 if (selected == 0) return BOOT_NORMAL;
@@ -141,6 +148,9 @@ int recovery_boot_menu(const BootInfo *bi, const AtaDisk *disk,
                 } else if (selected == 4) {
                     recovery_details(bi, disk, disk_result, fs_result);
                     break;
+                } else if (selected == 5) {
+                    diag_run();
+                    break;
                 } else reboot();
             }
         }
@@ -149,7 +159,7 @@ int recovery_boot_menu(const BootInfo *bi, const AtaDisk *disk,
             if (m.type != MOUSE_LDOWN) continue;
             int x = (gfx_width() - 480) / 2;
             int y = (gfx_height() - 350) / 2;
-            int count = fs_result == 0 ? 6 : 2;
+            int count = fs_result == 0 ? 7 : 3;
             int row = (m.y - (y + 72)) / 36;
             if (m.x < x + 16 || m.x >= x + 464 || row < 0 || row >= count) continue;
             selected = row;
