@@ -30,7 +30,7 @@ C_SRCS := \
 	kernel/app_tools.c kernel/app_ftp.c \
 	kernel/sound.c kernel/wallpaper.c kernel/login.c kernel/font8x16_fallback.c \
 	kernel/desktop.c kernel/setup.c 	kernel/pci.c kernel/xhci.c kernel/nvme.c kernel/vmm.c \
-	kernel/memmap.c kernel/hpet.c kernel/diag.c \
+	kernel/memmap.c kernel/hpet.c kernel/acpi.c kernel/diag.c \
 	kernel/settings.c kernel/app_control.c kernel/app_player.c \
 	kernel/main.c
 

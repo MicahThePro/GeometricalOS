@@ -7,6 +7,7 @@
 #include "pci.h"
 #include "serial.h"
 #include "xhci.h"
+#include "acpi.h"
 
 /* Fixed addresses the kernel uses. Bit i of overlap_mask means address i
  * was not inside a usable UEFI region. */
@@ -15,7 +16,7 @@ static const uint32_t watch_addr[] = {
     0x80000u, 0x90000u, 0u, 0x1800000u, 0x1100000u
 };
 
-static char fixed_line[28][96];
+static char fixed_line[40][96];
 static int fixed_count;
 static int probed;
 
@@ -484,11 +485,17 @@ static void collect_memory(void) {
     add_line(line);
 }
 
+static void collect_steps(void) {
+    for (int i = 0; i < acpi_step_count(); i++) add_line(acpi_step_line(i));
+    for (int i = 0; i < input_step_count(); i++) add_line(input_step_line(i));
+    add_line("1 IRQ   2 self-test AA   3 no reset");
+}
+
 static void collect(void) {
     fixed_count = 0;
     collect_memory();
     collect_timer();
-    collect_8042();
+    collect_steps();
     collect_xhci();
     probed = 1;
 }
@@ -579,7 +586,18 @@ void diag_run(void) {
         gfx_present();
         input_poll();
         KeyEvent key;
-        if (input_key(&key)) break;
+        if (!input_key(&key)) continue;
+        if (key.code == '1' || key.code == '2' || key.code == '3') {
+            int flags = 0;
+            if (key.code == '1') flags = KBD_IRQ;
+            if (key.code == '2') flags = KBD_AA;
+            if (key.code == '3') flags = KBD_NO_RESET;
+            input_kbd_reinit(flags);
+            collect();
+            logged = 0;
+            continue;
+        }
+        break;
     }
     serial_write("DIAG: EXIT\n");
 }

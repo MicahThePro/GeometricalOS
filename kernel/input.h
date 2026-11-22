@@ -47,7 +47,15 @@ typedef struct {
     int y;
 } MouseEvent;
 
+#define KBD_AA 1
+#define KBD_NO_RESET 2
+#define KBD_IRQ 4
+
 void input_init(void);
+void input_kbd_reinit(int flags);
+int input_step_count(void);
+const char *input_step_line(int index);
+int input_ps2_present(void);
 void input_poll(void);
 void input_idle(void);
 void input_post_scancode(uint8_t scancode);

@@ -16,6 +16,7 @@
 #include "buildid.h"
 #include "memmap.h"
 #include "xhci.h"
+#include "acpi.h"
 
 #define BOOT_NOT_CHECKED (-100)
 
@@ -208,6 +209,7 @@ void kmain(void) {
     timer_calibrate();
     mem_selftest();
     xhci_handoff_all();
+    acpi_bringup();
     input_init();
     if (bi->ext_mem_kb && bi->ext_mem_kb < 7000) {
         AtaDisk none;

@@ -1,4 +1,5 @@
 #include "input.h"
+#include "acpi.h"
 #include "hpet.h"
 #include "gfx.h"
 #include "io.h"
@@ -20,6 +21,11 @@ static int pit_alive;
 static uint32_t tsc_per_ms;
 static const char *clock_source = "none";
 static int hpet_ok;
+static int force_set2;
+static int cmd_active;
+static int ps2_poll_ok;
+static int ps2_present;
+static void ps2_drain(void);
 
 static uint64_t rdtsc_now(void) {
     uint32_t lo, hi;
@@ -78,8 +84,14 @@ int timer_pit_alive(void) { return pit_alive; }
 void timer_wait_ms(int ms) {
     if (ms < 1) ms = 1;
     if (tsc_per_ms) {
-        uint64_t end = rdtsc_now() + (uint64_t)ms * tsc_per_ms;
-        while (rdtsc_now() < end) {}
+        int left = ms;
+        while (left > 0) {
+            int slice = left > 1 ? 1 : left;
+            uint64_t end = rdtsc_now() + (uint64_t)slice * tsc_per_ms;
+            while (rdtsc_now() < end) {}
+            left -= slice;
+            if (ps2_poll_ok && !cmd_active) ps2_drain();
+        }
         return;
     }
     if (hpet_present() && hpet_period()) {
@@ -230,6 +242,7 @@ static uint8_t set2_to_set1(uint8_t c) {
 
 static void kbd_feed(uint8_t sc) {
     static int set2, f0;
+    if (force_set2) set2 = 1;
     if (sc == 0xF0) { f0 = 1; set2 = 1; return; }
     if (sc == 0xE0) { e0 = 1; return; }
     if (sc == 0xE1) return;
@@ -409,11 +422,87 @@ static int ps2_acked;
 static uint32_t ps2_retry_at;
 static int ps2_retries;
 
-/* The firmware is already translating keystrokes. Disabling the port or
- * resetting it stops that stream, so only ask the keyboard to scan. */
-static void ps2_bringup(void) {
-    int floating = 0;
-    for (int i = 0; i < 16; i++) if (inb(0x64) == 0xFF) floating++;
+static char steps[32][72];
+static int step_n;
+
+static void klog(const char *s) {
+    serial_write("KBD: ");
+    serial_write(s);
+    serial_write("\n");
+    if (step_n >= (int)(sizeof(steps) / sizeof(steps[0]))) return;
+    int i = 0;
+    for (; s[i] && i < 70; i++) steps[step_n][i] = s[i];
+    steps[step_n][i] = 0;
+    step_n++;
+}
+
+static void hex_put(char *d, int *n, uint32_t v) {
+    static const char h[] = "0123456789ABCDEF";
+    d[(*n)++] = h[(v >> 4) & 0xF];
+    d[(*n)++] = h[v & 0xF];
+}
+
+static int ps2_timed_out(uint64_t t0, int ms, int spins) {
+    if (tsc_per_ms)
+        return (rdtsc_now() - t0) >= (uint64_t)tsc_per_ms * (uint32_t)ms;
+    return spins > 100000;
+}
+
+static int ps2_wait_ibf(void) {
+    uint64_t t0 = rdtsc_now();
+    for (int i = 0; i < 2000000; i++) {
+        uint8_t st = inb(0x64);
+        if (st == 0xFF) return -2;
+        if (!(st & 2)) return 0;
+        if (st & 1) {
+            uint8_t d = inb(0x60);
+            input_note_ps2(st, d);
+        }
+        if (ps2_timed_out(t0, 50, i)) break;
+    }
+    return -1;
+}
+
+static int ps2_cmd64(uint8_t c) {
+    if (ps2_wait_ibf()) return -1;
+    outb(0x64, c);
+    return 0;
+}
+
+static int ps2_out60(uint8_t c) {
+    if (ps2_wait_ibf()) return -1;
+    outb(0x60, c);
+    return 0;
+}
+
+static int ps2_in60(int ms) {
+    uint64_t t0 = rdtsc_now();
+    for (int i = 0; i < 2000000; i++) {
+        uint8_t st = inb(0x64);
+        if (st == 0xFF) return -2;
+        if (st & 1) {
+            uint8_t d = inb(0x60);
+            input_note_ps2(st, d);
+            if (st & 0x20) {
+                mouse_feed(d);
+                continue;
+            }
+            return d;
+        }
+        if (ps2_timed_out(t0, ms, i)) return -1;
+    }
+    return -1;
+}
+
+static void irq1_on(void);
+
+/* Linux i8042 controller init, with every wait capped. 0xAA is off unless
+ * KBD_AA is set. 0xFF is skipped when KBD_NO_RESET is set. */
+static void ps2_bringup(int flags) {
+    cmd_active = 1;
+    ps2_poll_ok = 0;
+    step_n = 0;
+    force_set2 = 0;
     mouse_x = gfx_width() / 2;
     mouse_y = gfx_height() / 2;
     prev_btn = 0;
@@ -421,18 +510,320 @@ static void ps2_bringup(void) {
     pkt_tick = 0;
     ps2_retry_at = 200;
     ps2_retries = 0;
-    if (floating > 12) {
-        serial_write("KBD: no controller\n");
+    ps2_acked = 0;
+    uint64_t t0 = rdtsc_now();
+    uint8_t st = inb(0x64);
+    if (st == 0xFF) {
+        ps2_present = 0;
+        uint32_t ms = tsc_per_ms ? (uint32_t)((rdtsc_now() - t0) / tsc_per_ms) : 0;
+        char line[72];
+        int n = 0;
+        const char *p = "8042 none ";
+        while (*p) line[n++] = *p++;
+        char rev[8];
+        int r = 0;
+        uint32_t v = ms;
+        if (!v) rev[r++] = '0';
+        while (v && r < 8) { rev[r++] = (char)('0' + v % 10); v /= 10; }
+        while (r) line[n++] = rev[--r];
+        const char *msuf = "ms";
+        while (*msuf) line[n++] = *msuf++;
+        line[n] = 0;
+        klog(line);
+        cmd_active = 0;
+        ps2_poll_ok = 1;
         return;
     }
-    ps2_kbd(0xF4);
-    ps2_acked = ps2_collect(0xFA, 0xFA, 4, 200000);
-    ps2_cmd(0xD4);
-    ps2_kbd(0xF4);
-    serial_write(ps2_acked ? "KBD: scanning\n" : "KBD: no ack\n");
+    ps2_present = 1;
+    {
+        char line[72];
+        int n = 0;
+        const char *p = "st ";
+        while (*p) line[n++] = *p++;
+        hex_put(line, &n, st);
+        line[n] = 0;
+        klog(line);
+    }
+    if (ps2_cmd64(0xAD) || ps2_cmd64(0xA7)) {
+        klog("disable timeout");
+        cmd_active = 0;
+        ps2_poll_ok = 1;
+        return;
+    }
+    char line[72];
+    int n = 0;
+    const char *p = "flush";
+    while (*p) line[n++] = *p++;
+    int flushed = 0;
+    for (int i = 0; i < 16; i++) {
+        st = inb(0x64);
+        if (st == 0xFF || !(st & 1)) break;
+        uint8_t d = inb(0x60);
+        input_note_ps2(st, d);
+        line[n++] = ' ';
+        hex_put(line, &n, d);
+        flushed++;
+    }
+    if (!flushed) {
+        p = " 0";
+        while (*p) line[n++] = *p++;
+    }
+    line[n] = 0;
+    klog(line);
+
+    if (ps2_cmd64(0x20)) {
+        klog("cfg read timeout");
+        cmd_active = 0;
+        ps2_poll_ok = 1;
+        return;
+    }
+    int cfg = ps2_in60(50);
+    if (cfg < 0) {
+        klog("cfg none");
+        cmd_active = 0;
+        ps2_poll_ok = 1;
+        return;
+    }
+    uint8_t next = (uint8_t)((cfg & ~0x13) | 0x40);
+    if (ps2_cmd64(0x60) || ps2_out60(next) || ps2_cmd64(0x20)) {
+        klog("cfg write timeout");
+        cmd_active = 0;
+        ps2_poll_ok = 1;
+        return;
+    }
+    int back = ps2_in60(50);
+    n = 0;
+    p = "cfg ";
+    while (*p) line[n++] = *p++;
+    hex_put(line, &n, (uint32_t)cfg);
+    line[n++] = '>';
+    if (back < 0) {
+        line[n++] = '-';
+    } else {
+        hex_put(line, &n, (uint32_t)back);
+    }
+    int xlate = back >= 0 && (back & 0x40);
+    int match = back == (int)next;
+    p = match ? " ok" : " FAIL";
+    while (*p) line[n++] = *p++;
+    if (!xlate) {
+        p = " set2";
+        while (*p) line[n++] = *p++;
+        force_set2 = 1;
+    }
+    line[n] = 0;
+    klog(line);
+
+    if (flags & KBD_AA) {
+        if (ps2_cmd64(0xAA)) klog("AA timeout");
+        else {
+            int aa = ps2_in60(50);
+            n = 0;
+            p = "AA ";
+            while (*p) line[n++] = *p++;
+            if (aa < 0) line[n++] = '-';
+            else hex_put(line, &n, (uint32_t)aa);
+            line[n] = 0;
+            klog(line);
+            if (ps2_cmd64(0x60) || ps2_out60(next)) klog("cfg restore timeout");
+        }
+    }
+
+    if (ps2_cmd64(0xAB)) klog("AB timeout");
+    else {
+        int ab = ps2_in60(50);
+        n = 0;
+        p = "AB ";
+        while (*p) line[n++] = *p++;
+        if (ab < 0) line[n++] = '-';
+        else hex_put(line, &n, (uint32_t)ab);
+        line[n] = 0;
+        klog(line);
+    }
+    if (ps2_cmd64(0xAE)) klog("AE timeout");
+    else klog("AE");
+
+    if (!(flags & KBD_NO_RESET)) {
+        int saw_fa = 0, saw_aa = 0;
+        n = 0;
+        p = "FF";
+        while (*p) line[n++] = *p++;
+        for (int attempt = 0; attempt < 3 && !saw_fa; attempt++) {
+            if (ps2_out60(0xFF)) break;
+            uint64_t start = rdtsc_now();
+            for (;;) {
+                int remain = 1000;
+                if (tsc_per_ms) {
+                    uint64_t used = (rdtsc_now() - start) / tsc_per_ms;
+                    if (used >= 1000) break;
+                    remain = (int)(1000 - used);
+                    if (remain > 50) remain = 50;
+                }
+                int v = ps2_in60(remain);
+                if (v < 0) {
+                    if (!tsc_per_ms || (rdtsc_now() - start) / tsc_per_ms >= 1000) break;
+                    continue;
+                }
+                if (n > 60) break;
+                line[n++] = ' ';
+                hex_put(line, &n, (uint32_t)v);
+                if (v == 0xFA) saw_fa = 1;
+                if (v == 0xAA) saw_aa = 1;
+                if (v == 0xFE && !saw_fa) break;
+                if (saw_fa && saw_aa) break;
+                if (tsc_per_ms && (rdtsc_now() - start) / tsc_per_ms >= 1000) break;
+            }
+            if (saw_fa) break;
+        }
+        line[n] = 0;
+        klog(line);
+    } else {
+        klog("FF skipped");
+    }
+
+    if (ps2_out60(0xF2)) klog("F2 timeout");
+    else {
+        n = 0;
+        p = "ID";
+        while (*p) line[n++] = *p++;
+        for (int i = 0; i < 4; i++) {
+            int v = ps2_in60(50);
+            if (v < 0) break;
+            line[n++] = ' ';
+            hex_put(line, &n, (uint32_t)v);
+        }
+        line[n] = 0;
+        klog(line);
+    }
+
+    n = 0;
+    p = "F0";
+    while (*p) line[n++] = *p++;
+    if (!ps2_out60(0xF0)) {
+        int v = ps2_in60(50);
+        if (v == 0xFE) {
+            ps2_out60(0xF0);
+            v = ps2_in60(50);
+        }
+        if (v >= 0) { line[n++] = ' '; hex_put(line, &n, (uint32_t)v); }
+        if (v == 0xFA && !ps2_out60(0x02)) {
+            int v2 = ps2_in60(50);
+            if (v2 >= 0) { line[n++] = ' '; hex_put(line, &n, (uint32_t)v2); }
+        }
+    } else {
+        line[n++] = ' ';
+        line[n++] = '-';
+    }
+    line[n] = 0;
+    klog(line);
+
+    n = 0;
+    p = "F4";
+    while (*p) line[n++] = *p++;
+    if (!ps2_out60(0xF4)) {
+        int v = ps2_in60(50);
+        if (v == 0xFE) {
+            ps2_out60(0xF4);
+            v = ps2_in60(50);
+        }
+        if (v >= 0) { line[n++] = ' '; hex_put(line, &n, (uint32_t)v); }
+        if (v == 0xFA) ps2_acked = 1;
+    }
+    line[n] = 0;
+    klog(line);
+    klog(ps2_acked ? "ready" : "no ack");
+    if (flags & KBD_IRQ) irq1_on();
+    cmd_active = 0;
+    ps2_poll_ok = 1;
+}
+
+extern void irq1_stub(void);
+extern void irq_eoi_stub(void);
+
+void irq1_handler(void) {
+    uint8_t st = inb(0x64);
+    if (st != 0xFF && (st & 1)) {
+        uint8_t d = inb(0x60);
+        input_note_ps2(st, d);
+        if (st & 0x20) mouse_feed(d);
+        else if (d != 0xFA && d != 0xAA && d != 0xFE) {
+            byte_count++;
+            kbd_feed(d);
+        }
+    }
+    outb(0x20, 0x20);
+}
+
+static uint64_t idt[256];
+
+static void idt_set(int vec, void *fn) {
+    uint32_t addr = (uint32_t)fn;
+    uint16_t *gate = (uint16_t *)&idt[vec];
+    gate[0] = (uint16_t)addr;
+    gate[1] = 0x08;
+    gate[2] = 0x8E00;
+    gate[3] = (uint16_t)(addr >> 16);
+}
+
+static void ioapic_write(uint32_t base, uint32_t reg, uint32_t val) {
+    volatile uint32_t *sel = (volatile uint32_t *)(uintptr_t)base;
+    volatile uint32_t *win = (volatile uint32_t *)(uintptr_t)(base + 0x10u);
+    *sel = reg;
+    *win = val;
+}
+
+static void irq1_on(void) {
+    for (int i = 0; i < 256; i++) idt_set(i, irq_eoi_stub);
+    idt_set(0x21, irq1_stub);
+    struct __attribute__((packed)) { uint16_t limit; uint32_t base; } idtr;
+    idtr.limit = (uint16_t)(sizeof(idt) - 1u);
+    idtr.base = (uint32_t)idt;
+    __asm__ volatile ("lidt %0" :: "m"(idtr));
+
+    outb(0x21, 0xFF);
+    outb(0xA1, 0xFF);
+    outb(0x20, 0x11);
+    outb(0xA0, 0x11);
+    outb(0x21, 0x20);
+    outb(0xA1, 0x28);
+    outb(0x21, 0x04);
+    outb(0xA1, 0x02);
+    outb(0x21, 0x01);
+    outb(0xA1, 0x01);
+    outb(0x21, (uint8_t)~0x02u);
+    outb(0xA1, 0xFF);
+
+    uint32_t ioapic = 0, gsi = 1;
+    int level = 0, low = 0;
+    acpi_irq1(&ioapic, &gsi, &level, &low);
+    char line[72];
+    int n = 0;
+    const char *p = "IRQ pic";
+    while (*p) line[n++] = *p++;
+    if (ioapic >= 0xF0000000u && gsi < 24u) {
+        volatile uint32_t *lapic = (volatile uint32_t *)0xFEE00000u;
+        lapic[0xF0 / 4] = 0x1FFu;
+        uint32_t dest = lapic[0x20 / 4] & 0xFF000000u;
+        uint32_t lowdw = 0x21u;
+        if (low) lowdw |= 1u << 13;
+        if (level) lowdw |= 1u << 15;
+        ioapic_write(ioapic, 0x10u + gsi * 2u, lowdw);
+        ioapic_write(ioapic, 0x10u + gsi * 2u + 1u, dest);
+        p = low ? " ioapic low" : " ioapic high";
+        while (*p) line[n++] = *p++;
+        p = level ? " level" : " edge";
+        while (*p) line[n++] = *p++;
+    } else {
+        p = " only";
+        while (*p) line[n++] = *p++;
+    }
+    line[n] = 0;
+    klog(line);
+    sti_if();
 }
 
 static void ps2_drain(void) {
+    if (cmd_active) return;
     for (int n = 0; n < 16; n++) {
         uint8_t st = inb(0x64);
         if (st == 0xFF || !(st & 1)) break;
@@ -451,9 +842,21 @@ void input_idle(void) {
     input_timer();
 }
 
+int input_step_count(void) { return step_n; }
+const char *input_step_line(int index) {
+    if (index < 0 || index >= step_n) return "";
+    return steps[index];
+}
+int input_ps2_present(void) { return ps2_present; }
+
+void input_kbd_reinit(int flags) {
+    cli_if();
+    ps2_bringup(flags);
+}
+
 void input_init(void) {
     pit_init();
-    ps2_bringup();
+    ps2_bringup(0);
     xhci_init();
     if (ps2_acked) xhci_append_status(" ps2");
 }
@@ -488,10 +891,11 @@ void input_poll(void) {
     ps2_drain();
     /* Some HP keyboards answer only after the embedded controller finishes
      * starting. Ask again until a real byte shows up. */
-    if (!byte_count && ps2_retries < 4 && timer_ticks() >= ps2_retry_at) {
+    if (ps2_present && !cmd_active && !byte_count && ps2_retries < 4 &&
+        timer_ticks() >= ps2_retry_at) {
         ps2_retries++;
         ps2_retry_at = timer_ticks() + 300;
-        ps2_kbd(0xF4);
+        ps2_out60(0xF4);
     }
     xhci_poll();
     ps2_drain();
