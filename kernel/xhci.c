@@ -69,6 +69,79 @@ static struct {
 } usb_info[USB_MAX];
 static int usb_info_n;
 
+/* Why the first command (Enable Slot) did or did not run. DIAG prints this. */
+enum {
+    TR_NONE = 0,
+    TR_MAP,
+    TR_HALT,
+    TR_CNR,
+    TR_PAGE,
+    TR_SCRATCH,
+    TR_RING,
+    TR_RUN,
+    TR_CRCR,
+    TR_NOCCS,
+    TR_PORT,
+    TR_CMD,
+    TR_OK
+};
+static const char *const tr_name[] = {
+    "none", "map", "halt", "cnr", "page", "scratch", "ring", "run", "crcr",
+    "noccs", "port", "cmd", "ok"
+};
+typedef struct {
+    uint8_t bus, dev, fn;
+    uint8_t stage;
+    uint8_t code;
+    uint8_t timeout;
+    uint8_t have_code;
+    uint32_t usbsts;
+    uint32_t crcr;
+    uint32_t portsc;
+    Ctrl *hc;
+} CmdTrace;
+static CmdTrace traces[4];
+static int trace_n;
+static CmdTrace *cur_trace;
+static uint32_t last_portsc;
+
+static uint32_t rd(volatile uint32_t *r);
+
+static void trace_open(int bus, int dev, int fn, Ctrl *hc) {
+    if (trace_n >= 4) {
+        cur_trace = 0;
+        return;
+    }
+    cur_trace = &traces[trace_n++];
+    memset(cur_trace, 0, sizeof(*cur_trace));
+    cur_trace->bus = (uint8_t)bus;
+    cur_trace->dev = (uint8_t)dev;
+    cur_trace->fn = (uint8_t)fn;
+    cur_trace->hc = hc;
+    cur_trace->stage = TR_NONE;
+}
+
+static void trace_snap(int stage) {
+    if (!cur_trace) return;
+    if (stage) cur_trace->stage = (uint8_t)stage;
+    if (cur_trace->hc && cur_trace->hc->op) {
+        cur_trace->usbsts = rd(cur_trace->hc->op + 1);
+        cur_trace->crcr = rd(cur_trace->hc->op + (0x18 / 4));
+    }
+}
+
+/* Record only the first command on this controller. */
+static void trace_command(Ctrl *hc, int timed_out, uint32_t code) {
+    CmdTrace *t = cur_trace;
+    if (!t || t->hc != hc || t->have_code || t->timeout) return;
+    t->timeout = timed_out ? 1 : 0;
+    t->have_code = timed_out ? 0 : 1;
+    t->code = (uint8_t)code;
+    t->stage = timed_out ? TR_CMD : (code == 1 ? TR_OK : TR_CMD);
+    t->usbsts = rd(hc->op + 1);
+    t->crcr = rd(hc->op + (0x18 / 4));
+}
+
 static void usb_note(uint16_t vid, uint16_t pid, int cls, int speed, int state) {
     if (usb_info_n >= USB_MAX) return;
     usb_info[usb_info_n].vid = vid;
@@ -181,27 +254,11 @@ static void wr64(volatile uint32_t *r, uint32_t low) {
     r[1] = 0;
 }
 
-static uint16_t pit_now(void) {
-    outb(0x43, 0x00);
-    uint16_t lo = inb(0x40);
-    uint16_t hi = inb(0x40);
-    return (uint16_t)((hi << 8) | lo);
-}
-
-/* One PIT period is 10 ms. Count the counter down instead of trusting the
- * tick total, which can run ahead and make a USB timeout return immediately. */
+/* The raw PIT latch wraps and ends a slice early, so a "20 ms" port scan
+ * could finish before a device reconnected. Use the calibrated TSC wait. */
 static void wait_ms(int ms) {
-    int slices = ms / 10;
-    if (slices < 1) slices = 1;
-    for (int s = 0; s < slices; s++) {
-        uint16_t start = pit_now();
-        for (int i = 0; i < 400000; i++) {
-            uint16_t now = pit_now();
-            if (now > start) break;
-            if ((uint16_t)(start - now) > 11000) break;
-        }
-        input_idle();
-    }
+    timer_wait_ms(ms);
+    input_idle();
 }
 
 static int ring_init(Ring *r, uint32_t n, int with_link) {
@@ -467,41 +524,79 @@ static int halt_and_reset(Ctrl *hc) {
     return -2;
 }
 
-static int port_reset(Ctrl *hc, int port) {
+/* Bit set = USB3 root port (1-based offset from the protocol cap). */
+static uint32_t usb3_port_mask(volatile uint8_t *cap) {
+    uint32_t hcc = rd((volatile uint32_t *)(cap + 0x10));
+    uint32_t xecp = (hcc >> 16) & 0xFFFFu;
+    if (!xecp || (xecp << 2) >= 0x8000u) return 0;
+    volatile uint32_t *ext = (volatile uint32_t *)(cap + (xecp << 2));
+    uint32_t mask = 0;
+    for (int n = 0; n < 16; n++) {
+        uint32_t v = rd(ext);
+        uint32_t id = v & 0xFFu;
+        uint32_t next = (v >> 8) & 0xFFu;
+        if (id == 2) {
+            uint32_t major = (v >> 24) & 0xFFu;
+            uint32_t info = rd(ext + 2);
+            uint32_t off = info & 0xFFu;
+            uint32_t cnt = (info >> 8) & 0xFFu;
+            if (major >= 3 && off >= 1) {
+                for (uint32_t i = 0; i < cnt && off + i <= 32; i++)
+                    mask |= 1u << (off - 1u + i);
+            }
+        }
+        if (!next) break;
+        ext = (volatile uint32_t *)((uint8_t *)ext + (next << 2));
+    }
+    return mask;
+}
+
+/* USB2 uses Port Reset. A connect-status blip during reset is normal and
+ * must not abort the wait. Warm reset is only for a USB3 port that Port
+ * Reset did not enable. */
+static int port_reset(Ctrl *hc, int port, int usb3) {
     volatile uint32_t *psc = hc->op + (0x400 / 4) + port * 4;
     uint32_t v = rd(psc);
-    if ((v & 1u) == 0) {
+    if ((v & (1u << 9)) == 0) {
         wr(psc, 1u << 9);
         wait_ms(20);
         v = rd(psc);
-        if ((v & 1u) == 0) return -1;
+    }
+    last_portsc = v;
+    if ((v & 1u) == 0) return -1;
+    if ((v & (1u << 1)) && ((v >> 5) & 0xFu) == 0 && ((v >> 10) & 0xFu) >= 1) {
+        int speed = (int)((v >> 10) & 0xFu);
+        wr(psc, (1u << 9) | (1u << 17) | (1u << 18) | (1u << 21));
+        last_portsc = rd(psc);
+        return speed;
     }
     wr(psc, (1u << 9) | (1u << 4));
     int speed = -2;
-    for (int i = 0; i < 40; i++) {
+    for (int i = 0; i < 30; i++) {
         wait_ms(10);
         v = rd(psc);
-        if ((v & 1u) == 0) return -1;
-        /* PRC (bit 21) and PED (bit 1) both have to be set. */
-        if ((v & (1u << 21)) && (v & (1u << 1))) {
+        int pr_clear = (v & (1u << 4)) == 0;
+        int prc = (v & (1u << 21)) != 0;
+        int ped = (v & (1u << 1)) != 0;
+        if (pr_clear && ped && (prc || i > 2)) {
             speed = (int)((v >> 10) & 0xFu);
-            break;
+            if (speed >= 1) break;
         }
     }
-    if (speed < 1 && (rd(psc) & 1u)) {
+    if (speed < 1 && usb3 && (rd(psc) & 1u)) {
         wr(psc, (1u << 9) | (1u << 31));
-        for (int i = 0; i < 40; i++) {
+        for (int i = 0; i < 30; i++) {
             wait_ms(10);
             v = rd(psc);
-            if ((v & 1u) == 0) return -1;
-            if ((v & (1u << 21)) && (v & (1u << 1))) {
+            if ((v & (1u << 1)) && ((v >> 10) & 0xFu) >= 1) {
                 speed = (int)((v >> 10) & 0xFu);
                 break;
             }
         }
     }
-    if ((v & 1u) == 0 || (v & (1u << 1)) == 0 || speed < 1) return -2;
-    wr(psc, (v & (1u << 9)) | (1u << 17) | (1u << 18) | (1u << 21));
+    last_portsc = v;
+    if (speed < 1 || (v & (1u << 1)) == 0) return -2;
+    wr(psc, (1u << 9) | (1u << 17) | (1u << 18) | (1u << 21) | (usb3 ? (1u << 19) : 0));
     return speed;
 }
 
@@ -718,7 +813,9 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
     uint32_t code = 0, slot = 0;
     Trb *enable = ring_write(&hc->cmd, 0, 0, 0, 9u << 10, 1);
     doorbell(hc, 0, 0);
-    if (wait_event(hc, 33, (uint32_t)(uintptr_t)enable, &code, &slot, 80) || code != 1 || !slot || slot > slots)
+    int timed_out = wait_event(hc, 33, (uint32_t)(uintptr_t)enable, &code, &slot, 60);
+    trace_command(hc, timed_out, timed_out ? 0 : code);
+    if (timed_out || code != 1 || !slot || slot > slots)
         return -1;
     int rc = 0;
     Ring ep0;
@@ -934,23 +1031,33 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
     pci_write16(bus, dev, fn, 4, (uint16_t)(cmdreg | 0x06));
     Ctrl *hc = &ctrls[ctrl_count];
     memset(hc, 0, sizeof(*hc));
+    trace_open(bus, dev, fn, hc);
     hc->cap = (volatile uint8_t *)(uintptr_t)mmio;
     uint32_t cap0 = rd((volatile uint32_t *)hc->cap);
     uint8_t caplen = (uint8_t)cap0;
-    if (caplen < 0x10 || caplen > 0x40) return -1;
+    if (caplen < 0x10 || caplen > 0x40) {
+        trace_snap(TR_MAP);
+        return -1;
+    }
     hc->op = (volatile uint32_t *)(hc->cap + caplen);
     uint32_t hcs1 = rd((volatile uint32_t *)(hc->cap + 4));
     uint32_t hcs2 = rd((volatile uint32_t *)(hc->cap + 8));
     uint32_t hcc = rd((volatile uint32_t *)(hc->cap + 0x10));
     uint32_t dboff = rd((volatile uint32_t *)(hc->cap + 0x14));
     uint32_t rtsoff = rd((volatile uint32_t *)(hc->cap + 0x18));
-    if (dboff < 0x100 || rtsoff < 0x100) return -1;
+    if (dboff < 0x100 || rtsoff < 0x100) {
+        trace_snap(TR_MAP);
+        return -1;
+    }
     hc->db = (volatile uint32_t *)(hc->cap + dboff);
     hc->rt = (volatile uint32_t *)(hc->cap + rtsoff + 0x20);
     hc->ctx_size = (hcc & 4u) ? 64u : 32u;
     uint32_t slots = hcs1 & 0xFFu;
     uint32_t ports = (hcs1 >> 24) & 0xFFu;
-    if (!slots || !ports) return -1;
+    if (!slots || !ports) {
+        trace_snap(TR_MAP);
+        return -1;
+    }
     if (slots > 64) slots = 64;
     if (ports > 32) ports = 32;
     saw_ctl++;
@@ -965,9 +1072,13 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
     bios_handoff(hc);
     if (halt_and_reset(hc)) {
         serial_write("XHCI: reset failed\n");
+        trace_snap((rd(hc->op + 1) & 0x800u) ? TR_CNR : TR_HALT);
         return -2;
     }
-    if ((rd(hc->op + 2) & 1u) == 0) return -3;
+    if ((rd(hc->op + 2) & 1u) == 0) {
+        trace_snap(TR_PAGE);
+        return -3;
+    }
     uint32_t scratch = xhci_scratchpad_count(hcs2);
     uint32_t psz = rd(hc->op + 2);
     uint32_t page_size = 4096;
@@ -977,49 +1088,102 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
         if (bit < 20) page_size = 1u << (bit + 12);
     }
     hc->dcbaa = halloc((slots + 1u) * 8u, 64);
-    if (!hc->dcbaa) return -4;
+    if (!hc->dcbaa) {
+        trace_snap(TR_RING);
+        return -4;
+    }
     memset(hc->dcbaa, 0, (slots + 1u) * 8u);
     if (scratch) {
-        uint64_t *spa = mem_alloc(scratch * 8u, 64);
-        if (!spa) return -5;
-        memset(spa, 0, scratch * 8u);
-        for (uint32_t i = 0; i < scratch; i++) {
-            void *page = mem_alloc(page_size, page_size);
-            if (!page) return -5;
-            memset(page, 0, page_size);
-            flush_range(page, page_size);
-            spa[i] = (uint64_t)(uintptr_t)page;
+        /* One contiguous run. mem_alloc returns the same address every call,
+         * so a loop of it makes every scratchpad page alias the array. */
+        uint64_t *spa = halloc(scratch * 8u, 64);
+        uint8_t *pages = halloc(scratch * page_size, page_size);
+        if (!pages) pages = mem_alloc(scratch * page_size, page_size);
+        if (!spa || !pages) {
+            trace_snap(TR_SCRATCH);
+            return -5;
         }
+        memset(spa, 0, scratch * 8u);
+        memset(pages, 0, scratch * page_size);
+        flush_range(pages, scratch * page_size);
+        for (uint32_t i = 0; i < scratch; i++)
+            spa[i] = (uint64_t)(uintptr_t)(pages + (uint32_t)i * page_size);
         hc->dcbaa[0] = (uint64_t)(uintptr_t)spa;
         flush_range(spa, scratch * 8u);
     }
     flush_range(hc->dcbaa, (slots + 1u) * 8u);
-    if (ring_init(&hc->cmd, 32, 1) || ring_init(&hc->event, 64, 0)) return -6;
+    if (ring_init(&hc->cmd, 32, 1) || ring_init(&hc->event, 64, 0)) {
+        trace_snap(TR_RING);
+        return -6;
+    }
     uint32_t *erst = halloc(16, 64);
-    if (!erst) return -7;
+    if (!erst) {
+        trace_snap(TR_RING);
+        return -7;
+    }
     erst[0] = (uint32_t)(uintptr_t)hc->event.trb;
     erst[1] = 0;
     erst[2] = hc->event.size;
     erst[3] = 0;
     wr(hc->op + (0x38 / 4), slots);
-    wr64(hc->op + (0x18 / 4), (uint32_t)(uintptr_t)hc->cmd.trb | 1u);
+    uint32_t cmd_ring = (uint32_t)(uintptr_t)hc->cmd.trb;
+    wr64(hc->op + (0x18 / 4), cmd_ring | 1u);
     wr64(hc->op + (0x30 / 4), (uint32_t)(uintptr_t)hc->dcbaa);
     wr(hc->rt + (0x08 / 4), 1);
     wr64(hc->rt + (0x10 / 4), (uint32_t)(uintptr_t)erst);
     wr64(hc->rt + (0x18 / 4), (uint32_t)(uintptr_t)hc->event.trb);
     wr(hc->rt, 0x2);
+    uint32_t crcr_now = rd(hc->op + (0x18 / 4));
+    if ((crcr_now & ~0x3Fu) != (cmd_ring & ~0x3Fu))
+        trace_snap(TR_CRCR);
     wr(hc->op, rd(hc->op) | 1u | 4u);
     for (int i = 0; i < 100; i++) {
         if ((rd(hc->op + 1) & 1u) == 0) break;
         wait_ms(10);
     }
-    if (rd(hc->op + 1) & 1u) return -8;
+    if (rd(hc->op + 1) & 1u) {
+        trace_snap((rd(hc->op + 1) & 0x800u) ? TR_CNR : TR_RUN);
+        return -8;
+    }
+    if (rd(hc->op + 1) & 0x1000u) {
+        trace_snap(TR_RUN);
+        return -8;
+    }
     hc->alive = 1;
     ctrl_count++;
-    wait_ms(20);
+    uint32_t usb3 = usb3_port_mask((volatile uint8_t *)hc->cap);
+    int saw_ccs = 0;
+    for (int i = 0; i < 20; i++) {
+        saw_ccs = 0;
+        for (uint32_t p = 0; p < ports; p++) {
+            volatile uint32_t *psc = hc->op + (0x400 / 4) + p * 4;
+            uint32_t v = rd(psc);
+            if ((v & (1u << 9)) == 0) wr(psc, 1u << 9);
+            if (v & 1u) saw_ccs = 1;
+        }
+        if (!saw_ccs && i >= 10) break;
+        if (saw_ccs && i >= 15) break;
+        wait_ms(10);
+    }
+    if (!saw_ccs) {
+        trace_snap(TR_NOCCS);
+        note_status();
+        serial_write("XHCI: ");
+        serial_write(xhci_cmd_line(bus, dev, fn));
+        serial_write("\n");
+        return 0;
+    }
     for (uint32_t p = 0; p < ports; p++) {
-        int speed = port_reset(hc, (int)p);
-        if (speed < 1) continue;
+        if (cur_trace && cur_trace->timeout) break;
+        int speed = port_reset(hc, (int)p, (usb3 & (1u << p)) != 0);
+        if (speed < 1) {
+            if (cur_trace && !cur_trace->have_code && !cur_trace->timeout && last_portsc & 1u) {
+                cur_trace->stage = TR_PORT;
+                cur_trace->portsc = last_portsc;
+                trace_snap(TR_PORT);
+            }
+            continue;
+        }
         saw_devs++;
         serial_write("XHCI: port ");
         serial_dec(p + 1);
@@ -1034,7 +1198,13 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
             serial_write("\n");
         }
     }
+    if (cur_trace && !cur_trace->have_code && !cur_trace->timeout &&
+        cur_trace->stage != TR_PORT && cur_trace->stage != TR_CRCR)
+        trace_snap(saw_ccs ? TR_PORT : TR_NOCCS);
     note_status();
+    serial_write("XHCI: ");
+    serial_write(xhci_cmd_line(bus, dev, fn));
+    serial_write("\n");
     return 0;
 }
 
@@ -1153,6 +1323,8 @@ void xhci_init(void) {
     ctrl_count = 0;
     ep_count = 0;
     usb_info_n = 0;
+    trace_n = 0;
+    cur_trace = 0;
     saw_ctl = saw_ports = saw_devs = saw_hubs = last_err = last_code = 0;
     next_window = 0xF2000000u;
     heap = XHCI_HEAP;
@@ -1202,6 +1374,8 @@ void xhci_init(void) {
                     mmio = map_high_bar(phys);
                 }
                 if (!mmio) {
+                    trace_open(bus, dev, fn, 0);
+                    if (cur_trace) cur_trace->stage = TR_MAP;
                     set_status("USB BAR high");
                     serial_write("XHCI: unmapped BAR\n");
                 } else {
@@ -1219,6 +1393,60 @@ void xhci_init(void) {
     serial_write(" init ms ");
     serial_dec((timer_ticks() - started) * 10u);
     serial_write("\n");
+}
+
+const char *xhci_cmd_line(int bus, int dev, int fn) {
+    static char line[96];
+    const CmdTrace *t = 0;
+    for (int i = 0; i < trace_n; i++) {
+        if (traces[i].bus == (uint8_t)bus && traces[i].dev == (uint8_t)dev &&
+            traces[i].fn == (uint8_t)fn) {
+            t = &traces[i];
+            break;
+        }
+    }
+    int n = 0;
+    const char *p = "  STS ";
+    while (*p) line[n++] = *p++;
+    static const char h[] = "0123456789ABCDEF";
+    uint32_t sts = t ? t->usbsts : 0;
+    uint32_t cr = t ? t->crcr : 0;
+    if (!t) {
+        p = "-------- CRCR -------- code - t0 none";
+        while (*p && n < 94) line[n++] = *p++;
+        line[n] = 0;
+        return line;
+    }
+    for (int s = 28; s >= 0; s -= 4) line[n++] = h[(sts >> s) & 0xF];
+    p = " CRCR ";
+    while (*p) line[n++] = *p++;
+    for (int s = 28; s >= 0; s -= 4) line[n++] = h[(cr >> s) & 0xF];
+    p = " code ";
+    while (*p) line[n++] = *p++;
+    if (!t->have_code) {
+        line[n++] = '-';
+    } else {
+        char tmp[4];
+        int tn = 0;
+        unsigned v = t->code;
+        if (v >= 100) tmp[tn++] = (char)('0' + v / 100);
+        if (v >= 10) tmp[tn++] = (char)('0' + (v / 10) % 10);
+        tmp[tn++] = (char)('0' + v % 10);
+        for (int i = 0; i < tn; i++) line[n++] = tmp[i];
+    }
+    line[n++] = ' ';
+    line[n++] = 't';
+    line[n++] = t->timeout ? '1' : '0';
+    line[n++] = ' ';
+    p = tr_name[t->stage < 13 ? t->stage : 0];
+    while (*p && n < 80) line[n++] = *p++;
+    if (t->stage == TR_PORT && t->portsc) {
+        p = " PSC ";
+        while (*p && n < 86) line[n++] = *p++;
+        for (int s = 28; s >= 0 && n < 94; s -= 4) line[n++] = h[(t->portsc >> s) & 0xF];
+    }
+    line[n] = 0;
+    return line;
 }
 
 int xhci_usb_count(void) { return usb_info_n; }

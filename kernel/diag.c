@@ -149,19 +149,6 @@ static uint32_t map_high(uint64_t phys, int slot) {
     return window + off;
 }
 
-static const char *compl_name(uint32_t code) {
-    switch (code) {
-    case 1: return "Success";
-    case 2: return "Data Buffer Error";
-    case 3: return "Babble";
-    case 4: return "USB Transaction Error";
-    case 5: return "TRB Error";
-    case 6: return "Stall";
-    case 13: return "Short Packet";
-    default: return "not issued";
-    }
-}
-
 static void describe_controller(int index, int bus, int dev, int fn) {
     char line[96];
     int n = 0;
@@ -207,14 +194,16 @@ static void describe_controller(int index, int bus, int dev, int fn) {
     add_line(line);
 
     if (!mmio) {
-        add_line("  mmio unmapped  compl: not issued");
+        add_line("  mmio unmapped");
+        add_line(xhci_cmd_line(bus, dev, fn));
         return;
     }
     volatile uint32_t *cap32 = (volatile uint32_t *)(uintptr_t)mmio;
     uint32_t cap0 = cap32[0];
     uint8_t caplen = (uint8_t)cap0;
     if (caplen < 0x10 || caplen > 0x40) {
-        add_line("  mmio invalid  compl: not issued");
+        add_line("  mmio invalid");
+        add_line(xhci_cmd_line(bus, dev, fn));
         return;
     }
     uint16_t ver = (uint16_t)(cap0 >> 16);
@@ -301,13 +290,7 @@ static void describe_controller(int index, int bus, int dev, int fn) {
     }
     line[n] = 0;
     add_line(line);
-    n = 0;
-    const char *tag = "  compl: ";
-    while (*tag) line[n++] = *tag++;
-    tag = compl_name(0);
-    while (*tag) line[n++] = *tag++;
-    line[n] = 0;
-    add_line(line);
+    add_line(xhci_cmd_line(bus, dev, fn));
 }
 
 static void collect_xhci(void) {
