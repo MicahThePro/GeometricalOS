@@ -66,6 +66,12 @@ static int last_ep_state = -1, last_dq = -1, last_events, last_speed = -1;
 static struct {
     uint16_t vid, pid;
     uint8_t cls, speed, state;
+    uint8_t port;    /* 1-based root hub port, 0 if unknown */
+    uint8_t bsr;     /* Address Device BSR=1 code, 0 timeout, 0xFF not run */
+    uint8_t get8;    /* GET_DESCRIPTOR(8) transfer code */
+    uint8_t adr;     /* Address Device BSR=0 code */
+    uint8_t slot_st; /* output slot state */
+    uint8_t ep_st;   /* output EP0 state */
 } usb_info[USB_MAX];
 static int usb_info_n;
 
@@ -144,11 +150,15 @@ static void trace_command(Ctrl *hc, int timed_out, uint32_t code) {
 
 static void usb_note(uint16_t vid, uint16_t pid, int cls, int speed, int state) {
     if (usb_info_n >= USB_MAX) return;
+    memset(&usb_info[usb_info_n], 0, sizeof(usb_info[0]));
     usb_info[usb_info_n].vid = vid;
     usb_info[usb_info_n].pid = pid;
     usb_info[usb_info_n].cls = (uint8_t)cls;
     usb_info[usb_info_n].speed = (uint8_t)speed;
     usb_info[usb_info_n].state = (uint8_t)state;
+    usb_info[usb_info_n].bsr = 0xFF;
+    usb_info[usb_info_n].get8 = 0xFF;
+    usb_info[usb_info_n].adr = 0xFF;
     usb_info_n++;
     serial_write("XHCI: dev ");
     serial_hex32(((uint32_t)vid << 16) | pid);
@@ -157,6 +167,31 @@ static void usb_note(uint16_t vid, uint16_t pid, int cls, int speed, int state) 
     serial_write(" speed ");
     serial_dec((uint32_t)speed);
     serial_write(state == 1 ? " ok\n" : state == 4 ? " hub\n" : state == 3 ? " skip\n" : " fail\n");
+}
+
+/* Codes: 0xFF means that step was not reached. 0 means the event timed out. */
+static void usb_detail(int port, int bsr, int get8, int adr, int slot_st, int ep_st) {
+    if (usb_info_n < 1) return;
+    int i = usb_info_n - 1;
+    usb_info[i].port = (uint8_t)port;
+    usb_info[i].bsr = (uint8_t)bsr;
+    usb_info[i].get8 = (uint8_t)get8;
+    usb_info[i].adr = (uint8_t)adr;
+    usb_info[i].slot_st = (uint8_t)slot_st;
+    usb_info[i].ep_st = (uint8_t)ep_st;
+    serial_write("XHCI: p");
+    serial_dec((uint32_t)port);
+    serial_write(" bsr ");
+    serial_dec((uint32_t)(bsr == 0xFF ? 0 : bsr));
+    serial_write(" get ");
+    serial_dec((uint32_t)(get8 == 0xFF ? 0 : get8));
+    serial_write(" adr ");
+    serial_dec((uint32_t)(adr == 0xFF ? 0 : adr));
+    serial_write(" st ");
+    serial_dec((uint32_t)slot_st);
+    serial_write(" ep ");
+    serial_dec((uint32_t)ep_st);
+    serial_write("\n");
 }
 
 const char *xhci_status_line(void) { return status_line; }
@@ -377,33 +412,40 @@ static void recover_ep0(Ctrl *hc, Ring *ep0, int slot) {
     wait_event(hc, 33, (uint32_t)(uintptr_t)setd, &code, 0, 40);
 }
 
+static void trb_cycle(Trb *t, uint32_t cycle) {
+    t->d[3] = (t->d[3] & ~1u) | (cycle & 1u);
+    flush_range(t, sizeof(*t));
+}
+
 static int control(Ctrl *hc, Ring *ep0, int slot, uint8_t bm, uint8_t req, uint16_t val,
                    uint16_t idx, void *data, uint16_t len, int dir_in, uint32_t *code) {
     ring_reserve(ep0, 4);
-    uint32_t saved = ep0->cycle;
+    uint32_t cycle = ep0->cycle;
     uint32_t setup_lo = (uint32_t)bm | ((uint32_t)req << 8) | ((uint32_t)val << 16);
     uint32_t setup_hi = (uint32_t)idx | ((uint32_t)len << 16);
     uint32_t trt = len ? (dir_in ? 3u : 2u) : 0;
-    /* Own bit stays off until the data and status TDs are in memory.
-     * This chip fetches the next TRB the moment the cycle bit flips. */
+    /* Setup is type 2, IDT set, TRT=3 for IN. Bit 4 is Chain on other TRBs
+     * and must stay clear here, or the controller glues Setup onto Data. */
     Trb *setup = ring_write(ep0, setup_lo, setup_hi, 8,
-                            (2u << 10) | (trt << 16) | (1u << 4) | (1u << 6), 0);
+                            (2u << 10) | (trt << 16) | (1u << 6), 0);
     Trb *data_trb = 0;
     if (len) {
         flush_range(data, len);
         uint32_t dir = dir_in ? (1u << 16) : 0;
-        data_trb = ring_write(ep0, (uint32_t)(uintptr_t)data, 0, len, (3u << 10) | dir, 1);
+        /* ISP: an 8-byte descriptor read is a short packet when MPS is 64 or 512. */
+        data_trb = ring_write(ep0, (uint32_t)(uintptr_t)data, 0, len,
+                              (3u << 10) | dir | (1u << 2), 0);
     }
-    Trb *status = ring_write(ep0, 0, 0, 0,
-                             (4u << 10) | (1u << 5) | ((len && dir_in) ? 0 : (1u << 16)), 1);
-    setup->d[3] = (setup->d[3] & ~1u) | saved;
-    flush_range(setup, sizeof(*setup));
+    uint32_t status_dir = (len && dir_in) ? 0u : (1u << 16);
+    Trb *status = ring_write(ep0, 0, 0, 0, (4u << 10) | (1u << 5) | status_dir, 0);
+    if (data_trb) trb_cycle(data_trb, cycle);
+    trb_cycle(status, cycle);
+    trb_cycle(setup, cycle);
+    __asm__ volatile ("mfence" ::: "memory");
     doorbell(hc, slot, 1);
-    uint32_t setup_ptr = (uint32_t)(uintptr_t)setup & ~0xFu;
-    uint32_t status_ptr = (uint32_t)(uintptr_t)status & ~0xFu;
     uint32_t data_ptr = data_trb ? ((uint32_t)(uintptr_t)data_trb & ~0xFu) : 0;
     int events = 0;
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 40; i++) {
         Trb ev;
         while (event_poll(hc, &ev)) {
             events++;
@@ -413,9 +455,7 @@ static int control(Ctrl *hc, Ring *ep0, int slot, uint8_t bm, uint8_t req, uint1
             uint32_t ptr = ev.d[0] & ~0xFu;
             uint32_t epid = (ev.d[3] >> 16) & 0x1Fu;
             uint32_t eslot = ev.d[3] >> 24;
-            int ptr_hit = ptr == setup_ptr || ptr == status_ptr || (data_ptr && ptr == data_ptr);
-            int id_hit = eslot == (uint32_t)slot && epid == 1;
-            if (!ptr_hit && !id_hit) continue;
+            if (eslot != (uint32_t)slot || epid != 1) continue;
             last_code = (int)got;
             last_events = events;
             if (code) *code = got;
@@ -564,12 +604,8 @@ static int port_reset(Ctrl *hc, int port, int usb3) {
     }
     last_portsc = v;
     if ((v & 1u) == 0) return -1;
-    if ((v & (1u << 1)) && ((v >> 5) & 0xFu) == 0 && ((v >> 10) & 0xFu) >= 1) {
-        int speed = (int)((v >> 10) & 0xFu);
-        wr(psc, (1u << 9) | (1u << 17) | (1u << 18) | (1u << 21));
-        last_portsc = rd(psc);
-        return speed;
-    }
+    /* Always bus-reset. A port can already be in U0 after link training
+     * without the device being in the Default state. */
     wr(psc, (1u << 9) | (1u << 4));
     int speed = -2;
     for (int i = 0; i < 30; i++) {
@@ -597,6 +633,18 @@ static int port_reset(Ctrl *hc, int port, int usb3) {
     last_portsc = v;
     if (speed < 1 || (v & (1u << 1)) == 0) return -2;
     wr(psc, (1u << 9) | (1u << 17) | (1u << 18) | (1u << 21) | (usb3 ? (1u << 19) : 0));
+    v = rd(psc);
+    if (((v >> 5) & 0xFu) != 0) {
+        /* LWS (bit 16) plus PLS=0 asks the link to enter U0. */
+        wr(psc, (1u << 9) | (1u << 16));
+        for (int i = 0; i < 10; i++) {
+            wait_ms(1);
+            v = rd(psc);
+            if (((v >> 5) & 0xFu) == 0) break;
+        }
+    }
+    wait_ms(20);
+    last_portsc = rd(psc);
     return speed;
 }
 
@@ -806,6 +854,14 @@ static int set_ep0_mps(Ctrl *hc, Ring *ep0, int slot, uint8_t *input, uint32_t *
     return (int)code;
 }
 
+static void ctx_states(Ctrl *hc, uint8_t *output, int *slot_st, int *ep_st) {
+    flush_range(output, hc->ctx_size * 2u);
+    uint32_t *slot_ctx = (uint32_t *)ctx_at(hc, output, 0);
+    uint32_t *ep0_ctx = (uint32_t *)ctx_at(hc, output, 1);
+    *slot_st = (int)((slot_ctx[3] >> 27) & 0x1Fu);
+    *ep_st = (int)(ep0_ctx[0] & 7u);
+}
+
 static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, int parent_slot,
                             int parent_port, uint32_t slots, int depth, int hub_mtt, int think) {
     if (depth > 4) return 0;
@@ -845,22 +901,35 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
     Trb *addr = ring_write(&hc->cmd, (uint32_t)(uintptr_t)input, 0, 0,
                            (11u << 10) | (1u << 9) | (slot << 24), 1);
     doorbell(hc, 0, 0);
-    if (wait_event(hc, 33, (uint32_t)(uintptr_t)addr, &code, 0, 40) || code != 1) {
+    int bsr_to = wait_event(hc, 33, (uint32_t)(uintptr_t)addr, &code, 0, 40);
+    int bsr = bsr_to ? 0 : (int)code;
+    int get8 = 0xFF, adr = 0xFF, sst = 0, est = 0;
+    ctx_states(hc, output, &sst, &est);
+    if (bsr_to || code != 1) {
+        usb_note(0, 0, 0, speed, 2);
+        usb_detail(root_port + 1, bsr, get8, adr, sst, est);
         rc = -4;
         goto fail;
     }
     last_speed = speed;
+    follow_ep0(hc, &ep0, output);
+    if (est == 2 || est == 4)
+        recover_ep0(hc, &ep0, (int)slot);
     memset(desc, 0, 18);
     if (control_retry(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code)) {
+        get8 = code ? (int)code : 0;
+        ctx_states(hc, output, &sst, &est);
         serial_write("XHCI: desc code ");
         serial_dec(code);
         serial_write("\n");
         usb_note(0, 0, 0, speed, 2);
+        usb_detail(root_port + 1, bsr, get8, adr, sst, est);
         last_err = -5;
         last_code = (int)code;
         rc = -5;
         goto fail;
     }
+    get8 = 1;
     uint32_t packet = desc[7];
     if (speed >= 4 && packet == 9) packet = 512;
     if (packet == 8 || packet == 16 || packet == 32 || packet == 64 || packet == 512) {
@@ -875,23 +944,31 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
     flush_range(input, 33u * hc->ctx_size);
     addr = ring_write(&hc->cmd, (uint32_t)(uintptr_t)input, 0, 0, (11u << 10) | (slot << 24), 1);
     doorbell(hc, 0, 0);
-    if (wait_event(hc, 33, (uint32_t)(uintptr_t)addr, &code, 0, 40) || code != 1) {
+    int adr_to = wait_event(hc, 33, (uint32_t)(uintptr_t)addr, &code, 0, 40);
+    adr = adr_to ? 0 : (int)code;
+    if (adr_to || code != 1) {
+        ctx_states(hc, output, &sst, &est);
         usb_note(0, 0, 0, speed, 2);
+        usb_detail(root_port + 1, bsr, get8, adr, sst, est);
         rc = -4;
         goto fail;
     }
     follow_ep0(hc, &ep0, output);
     if (control_retry(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 18, 1, &code)) {
+        ctx_states(hc, output, &sst, &est);
         usb_note(0, 0, 0, speed, 2);
+        usb_detail(root_port + 1, bsr, get8, adr, sst, est);
         rc = -5;
         goto fail;
     }
+    ctx_states(hc, output, &sst, &est);
     uint16_t dev_vid = (uint16_t)(desc[8] | (desc[9] << 8));
     uint16_t dev_pid = (uint16_t)(desc[10] | (desc[11] << 8));
     int dev_class = desc[4];
     int dev_proto = desc[6];
     if (dev_class != 0 && dev_class != 3 && dev_class != 9) {
         usb_note(dev_vid, dev_pid, dev_class, speed, 3);
+        usb_detail(root_port + 1, bsr, get8, adr, sst, est);
         disable_slot(hc, slot);
         return 0;
     }
@@ -932,6 +1009,7 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
     if (is_hub) {
         saw_hubs++;
         usb_note(dev_vid, dev_pid, 9, speed, 4);
+        usb_detail(root_port + 1, bsr, get8, adr, sst, est);
         if (control(hc, &ep0, (int)slot, 0x00, 9, config_val, 0, 0, 0, 0, &code)) { rc = -9; goto fail; }
         enumerate_hub(hc, &ep0, (int)slot, root_port, route, depth, slots, speed, dev_proto == 2, input, output);
         note_status();
@@ -939,10 +1017,12 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
     }
     if (ep_count == before) {
         usb_note(dev_vid, dev_pid, dev_class, speed, 3);
+        usb_detail(root_port + 1, bsr, get8, adr, sst, est);
         disable_slot(hc, slot);
         return 0;
     }
     usb_note(dev_vid, dev_pid, dev_class ? dev_class : 3, speed, 1);
+    usb_detail(root_port + 1, bsr, get8, adr, sst, est);
     memcpy(ctx_at(hc, input, 1), ctx_at(hc, output, 0), hc->ctx_size);
     memcpy(ctx_at(hc, input, 2), ctx_at(hc, output, 1), hc->ctx_size);
     uint32_t *ns = (uint32_t *)ctx_at(hc, input, 1);
@@ -1451,30 +1531,65 @@ const char *xhci_cmd_line(int bus, int dev, int fn) {
 
 int xhci_usb_count(void) { return usb_info_n; }
 
+static char *put_num(char *p, char *end, int v) {
+    if (v < 0) v = 0;
+    if (v > 99) v = 99;
+    if (v >= 10 && p < end) *p++ = (char)('0' + v / 10);
+    if (p < end) *p++ = (char)('0' + (v % 10));
+    return p;
+}
+
+static char *put_step(char *p, char *end, int code) {
+    if (p >= end) return p;
+    if (code == 0xFF) { *p++ = '-'; return p; }
+    if (code == 0) { *p++ = 't'; return p; }
+    return put_num(p, end, code);
+}
+
 const char *xhci_usb_line(int index) {
-    static char line[48];
+    static char line[80];
     if (index < 0 || index >= usb_info_n) return "";
     static const char h[] = "0123456789ABCDEF";
-    const char *st = usb_info[index].state == 1 ? "ok" :
-                     usb_info[index].state == 4 ? "hub" :
-                     usb_info[index].state == 3 ? "skip" : "fail";
-    int n = 0;
-    line[n++] = 'U'; line[n++] = 'S'; line[n++] = 'B'; line[n++] = ' ';
-    uint32_t id = ((uint32_t)usb_info[index].vid << 16) | usb_info[index].pid;
-    for (int s = 28; s >= 0; s -= 4) {
-        if (s == 12) line[n++] = ':';
-        line[n++] = h[(id >> s) & 0xF];
+    int fail = usb_info[index].state == 2;
+    char *p = line;
+    char *end = line + sizeof(line) - 1;
+    const char *tag = "USB ";
+    while (*tag && p < end) *p++ = *tag++;
+    if (!fail && (usb_info[index].vid || usb_info[index].pid)) {
+        uint32_t id = ((uint32_t)usb_info[index].vid << 16) | usb_info[index].pid;
+        for (int s = 28; s >= 0 && p < end; s -= 4) {
+            if (s == 12) *p++ = ':';
+            *p++ = h[(id >> s) & 0xF];
+        }
+        if (p < end) *p++ = ' ';
     }
-    line[n++] = ' ';
-    line[n++] = 'c';
-    line[n++] = h[(usb_info[index].cls >> 4) & 0xF];
-    line[n++] = h[usb_info[index].cls & 0xF];
-    line[n++] = ' ';
-    line[n++] = 's';
-    line[n++] = (char)('0' + (usb_info[index].speed % 10));
-    line[n++] = ' ';
-    for (int i = 0; st[i] && n < 46; i++) line[n++] = st[i];
-    line[n] = 0;
+    if (p < end) *p++ = 'p';
+    p = put_num(p, end, usb_info[index].port);
+    if (p < end) *p++ = ' ';
+    if (p < end) *p++ = 's';
+    if (p < end) *p++ = (char)('0' + (usb_info[index].speed % 10));
+    if (fail) {
+        const char *b = " bsr ";
+        while (*b && p < end) *p++ = *b++;
+        p = put_step(p, end, usb_info[index].bsr);
+        b = " get ";
+        while (*b && p < end) *p++ = *b++;
+        p = put_step(p, end, usb_info[index].get8);
+        b = " adr ";
+        while (*b && p < end) *p++ = *b++;
+        p = put_step(p, end, usb_info[index].adr);
+        b = " st ";
+        while (*b && p < end) *p++ = *b++;
+        p = put_num(p, end, usb_info[index].slot_st);
+        b = " ep ";
+        while (*b && p < end) *p++ = *b++;
+        p = put_num(p, end, usb_info[index].ep_st);
+    } else {
+        const char *st = usb_info[index].state == 1 ? " ok" :
+                         usb_info[index].state == 4 ? " hub" : " skip";
+        while (*st && p < end) *p++ = *st++;
+    }
+    *p = 0;
     return line;
 }
 
