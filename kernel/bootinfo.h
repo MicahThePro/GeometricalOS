@@ -43,9 +43,20 @@ typedef struct {
     char fw_vendor[64];
     /* Usable pages whose region starts at or above 4 GB. Zero on BIOS. */
     uint32_t high_pages;
+    /* Compact MemEntry array. Both zero on a BIOS boot. */
+    uint32_t mem_map_addr;
+    uint32_t mem_map_count;
+    /* Image arena from AllocatePages. Zero keeps the BIOS address. */
+    uint32_t image_arena;
+    uint32_t image_arena_pages;
+    /* ACPI RSDP. Zero if the firmware did not publish one below 4 GB. */
+    uint32_t rsdp_phys;
+    /* USB DMA heap. 0x1100000 when that range could be reserved. */
+    uint32_t xhci_heap;
 } BootInfo;
 
 typedef char bootinfo_high_ok[(__builtin_offsetof(BootInfo, high_pages) == 180) ? 1 : -1];
+typedef char bootinfo_map_ok[(__builtin_offsetof(BootInfo, mem_map_addr) == 184) ? 1 : -1];
 typedef char bootinfo_fits[(sizeof(BootInfo) <= 256) ? 1 : -1];
 
 static inline const BootInfo *bootinfo(void) {

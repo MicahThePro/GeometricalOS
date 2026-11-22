@@ -3,6 +3,7 @@
 #include "io.h"
 #include "input.h"
 #include "bootinfo.h"
+#include "memmap.h"
 #include "serial.h"
 
 /* Rings live in uncached memory. The UEFI loader marks this page uncached. */
@@ -373,27 +374,51 @@ static void follow_ep0(Ctrl *hc, Ring *ep0, uint8_t *output) {
     last_dq = (int)ep0->enqueue;
 }
 
-static void bios_handoff(Ctrl *hc) {
-    uint32_t hcc = rd((volatile uint32_t *)(hc->cap + 0x10));
+uint32_t xhci_scratchpad_count(uint32_t hcs2) {
+    return ((hcs2 >> 16) & 0x3E0u) | ((hcs2 >> 27) & 0x1Fu);
+}
+
+/* Linux drivers/usb/host/pci-quirks.c quirk_usb_handoff_xhci:
+ * set OS-owned, wait up to 1 s, force-clear BIOS-owned, then clear the
+ * SMI enables (bit 0, bit 4, bits 13-15) and the RW1C status bits 29-31.
+ * Writing 0x0000FFFF turns those enables on. */
+static void legacy_handoff(volatile uint8_t *cap, XhciHandoff *rec) {
+    uint32_t hcc = rd((volatile uint32_t *)(cap + 0x10));
     uint32_t xecp = (hcc >> 16) & 0xFFFFu;
-    if (!xecp) return;
-    volatile uint32_t *ext = (volatile uint32_t *)(hc->cap + (xecp << 2));
+    if (!xecp || (xecp << 2) >= 0x8000u) return;
+    volatile uint32_t *ext = (volatile uint32_t *)(cap + (xecp << 2));
     for (int n = 0; n < 16; n++) {
         uint32_t v = rd(ext);
         uint32_t id = v & 0xFFu;
         uint32_t next = (v >> 8) & 0xFFu;
         if (id == 1) {
+            rec->have_leg = 1;
+            rec->leg_before = v;
+            rec->ctl_before = rd(ext + 1);
             wr(ext, v | (1u << 24));
             for (int i = 0; i < 100; i++) {
                 if ((rd(ext) & (1u << 16)) == 0) break;
-                wait_ms(10);
+                timer_wait_ms(10);
             }
-            wr(ext + 1, 0x0000FFFFu);
+            uint32_t now = rd(ext);
+            if (now & (1u << 16))
+                wr(ext, (now | (1u << 24)) & ~(1u << 16));
+            uint32_t ctl = rd(ext + 1);
+            ctl = (ctl & ~0xE011u) | 0xE0000000u;
+            wr(ext + 1, ctl);
+            rec->leg_after = rd(ext);
+            rec->ctl_after = rd(ext + 1);
             return;
         }
         if (!next) return;
         ext = (volatile uint32_t *)((uint8_t *)ext + (next << 2));
     }
+}
+
+static void bios_handoff(Ctrl *hc) {
+    XhciHandoff ignored;
+    memset(&ignored, 0, sizeof(ignored));
+    legacy_handoff((volatile uint8_t *)hc->cap, &ignored);
 }
 
 static int halt_and_reset(Ctrl *hc) {
@@ -887,19 +912,26 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
         return -2;
     }
     if ((rd(hc->op + 2) & 1u) == 0) return -3;
-    uint32_t scratch = ((hcs2 >> 16) & 0x3E0u) | ((hcs2 >> 27) & 0x1Fu);
+    uint32_t scratch = xhci_scratchpad_count(hcs2);
+    uint32_t psz = rd(hc->op + 2);
+    uint32_t page_size = 4096;
+    if (psz) {
+        uint32_t bit = 0;
+        while (bit < 20 && ((psz >> bit) & 1u) == 0) bit++;
+        if (bit < 20) page_size = 1u << (bit + 12);
+    }
     hc->dcbaa = halloc((slots + 1u) * 8u, 64);
     if (!hc->dcbaa) return -4;
     memset(hc->dcbaa, 0, (slots + 1u) * 8u);
     if (scratch) {
-        if (scratch > 32) scratch = 32;
-        uint64_t *spa = halloc(scratch * 8u, 64);
+        uint64_t *spa = mem_alloc(scratch * 8u, 64);
         if (!spa) return -5;
+        memset(spa, 0, scratch * 8u);
         for (uint32_t i = 0; i < scratch; i++) {
-            void *page = halloc(4096, 4096);
+            void *page = mem_alloc(page_size, page_size);
             if (!page) return -5;
-            memset(page, 0, 4096);
-            flush_range(page, 4096);
+            memset(page, 0, page_size);
+            flush_range(page, page_size);
             spa[i] = (uint64_t)(uintptr_t)page;
         }
         hc->dcbaa[0] = (uint64_t)(uintptr_t)spa;
@@ -966,6 +998,116 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
     return 0;
 }
 
+static XhciHandoff handoffs[4];
+static int handoff_count;
+
+int xhci_handoff_count(void) { return handoff_count; }
+const XhciHandoff *xhci_handoff_at(int index) {
+    if (index < 0 || index >= handoff_count) return 0;
+    return &handoffs[index];
+}
+
+static uint32_t page_size_of(uint32_t psz) {
+    if (!psz) return 4096;
+    uint32_t bit = 0;
+    while (bit < 20 && ((psz >> bit) & 1u) == 0) bit++;
+    if (bit >= 20) return 4096;
+    return 1u << (bit + 12);
+}
+
+static void reserve_scratch(volatile uint8_t *cap, XhciHandoff *rec) {
+    uint32_t cap0 = *(volatile uint32_t *)cap;
+    uint8_t caplen = (uint8_t)cap0;
+    if (caplen < 0x10 || caplen > 0x40) return;
+    uint32_t hcs2 = *(volatile uint32_t *)(cap + 8);
+    uint32_t scratch = xhci_scratchpad_count(hcs2);
+    volatile uint32_t *op = (volatile uint32_t *)(cap + caplen);
+    uint32_t page = page_size_of(op[2]);
+    rec->scratch = scratch;
+    rec->page_size = page;
+    serial_write("SCRATCH n=");
+    serial_dec(scratch);
+    serial_write(" page=");
+    serial_dec(page);
+    if (!scratch || page < 4096 || scratch > 1023) {
+        serial_write("\n");
+        return;
+    }
+    uint64_t *spa = mem_alloc(scratch * 8u, 64);
+    if (!spa) {
+        serial_write(" SCRATCH FAIL\n");
+        return;
+    }
+    memset(spa, 0, scratch * 8u);
+    for (uint32_t i = 0; i < scratch; i++) {
+        uint8_t *buf = mem_alloc(page, page);
+        if (!buf) {
+            serial_write(" SCRATCH FAIL\n");
+            return;
+        }
+        memset(buf, 0, page);
+        spa[i] = (uint64_t)(uintptr_t)buf;
+    }
+    rec->scratch_addr = (uint32_t)(uintptr_t)spa;
+    serial_write(" at=");
+    serial_hex32(rec->scratch_addr);
+    serial_write("\n");
+}
+
+void xhci_handoff_all(void) {
+    handoff_count = 0;
+    for (int bus = 0; bus < 256 && handoff_count < 4; bus++) {
+        for (int dev = 0; dev < 32 && handoff_count < 4; dev++) {
+            for (int fn = 0; fn < 8 && handoff_count < 4; fn++) {
+                uint32_t id = pci_read(bus, dev, fn, 0);
+                if (id == 0xFFFFFFFFu || id == 0) {
+                    if (fn == 0) break;
+                    continue;
+                }
+                uint32_t cls = pci_read(bus, dev, fn, 8);
+                int xhci = (uint8_t)(cls >> 24) == 0x0C && (uint8_t)(cls >> 16) == 0x03 &&
+                           (uint8_t)(cls >> 8) == 0x30;
+                if (xhci) {
+                    XhciHandoff *rec = &handoffs[handoff_count];
+                    memset(rec, 0, sizeof(*rec));
+                    rec->bus = (uint8_t)bus;
+                    rec->dev = (uint8_t)dev;
+                    rec->fn = (uint8_t)fn;
+                    rec->vendor = (uint16_t)id;
+                    rec->device = (uint16_t)(id >> 16);
+                    uint32_t lo = pci_read(bus, dev, fn, 0x10);
+                    uint32_t hi = ((lo & 7u) == 4u) ? pci_read(bus, dev, fn, 0x14) : 0;
+                    rec->bar_lo = lo & ~0xFu;
+                    rec->bar_hi = hi;
+                    uint64_t phys = ((uint64_t)hi << 32) | (lo & ~0xFu);
+                    uint16_t cmd = (uint16_t)pci_read(bus, dev, fn, 4);
+                    pci_write16(bus, dev, fn, 4, (uint16_t)(cmd | 0x02u));
+                    uint32_t mmio = 0;
+                    if (phys && phys < 0x100000000ull) {
+                        force_uc(phys);
+                        mmio = (uint32_t)phys;
+                    } else if (phys) {
+                        mmio = map_high_bar(phys);
+                    }
+                    serial_write("XHCI: handoff ");
+                    serial_hex32((uint32_t)((bus << 16) | (dev << 8) | fn));
+                    serial_write(" mmio ");
+                    serial_hex32(mmio);
+                    serial_write("\n");
+                    if (mmio) {
+                        volatile uint8_t *cap = (volatile uint8_t *)(uintptr_t)mmio;
+                        legacy_handoff(cap, rec);
+                        reserve_scratch(cap, rec);
+                    }
+                    handoff_count++;
+                }
+                if (fn == 0 && !(pci_read(bus, dev, 0, 0x0C) & 0x00800000u)) break;
+            }
+        }
+    }
+    if (!handoff_count) serial_write("XHCI: handoff none\n");
+}
+
 void xhci_init(void) {
     /* Resetting this controller turns off the firmware keyboard. The laptop
      * keys arrive through that firmware path, and our own device reads still
@@ -978,6 +1120,8 @@ void xhci_init(void) {
     saw_ctl = saw_ports = saw_devs = saw_hubs = last_err = last_code = 0;
     next_window = 0xF2000000u;
     heap = XHCI_HEAP;
+    if (bootinfo()->magic == BOOTINFO_MAGIC && bootinfo()->xhci_heap)
+        heap = (uint8_t *)(uintptr_t)bootinfo()->xhci_heap;
     heap_used = 0;
     memset(heap, 0, XHCI_HEAP_SIZE);
     ctrls = halloc(sizeof(Ctrl) * MAX_CTL, 16);

@@ -1,4 +1,5 @@
 #include "image_memory.h"
+#include "bootinfo.h"
 #include "string.h"
 #include "third_party/libwebp/src/utils/random_utils.h"
 #include <stdint.h>
@@ -17,6 +18,11 @@ typedef struct {
 static uint32_t arena_used;
 
 static uint8_t *image_arena(void) {
+    const BootInfo *bi = bootinfo();
+    if (bi->magic == BOOTINFO_MAGIC && bi->mem_map_count) {
+        if (!bi->image_arena) return 0;
+        return (uint8_t *)(uintptr_t)bi->image_arena;
+    }
     return (uint8_t *)IMAGE_ARENA_ADDRESS;
 }
 
@@ -29,6 +35,7 @@ void *image_memory_alloc(size_t size) {
         return 0;
     uint32_t requested = ((uint32_t)size + 7u) & ~7u;
     uint8_t *arena = image_arena();
+    if (!arena) return 0;
     uint32_t offset = 0;
     while (offset < arena_used) {
         if (arena_used - offset < sizeof(ImageAllocHeader)) return 0;
@@ -68,6 +75,7 @@ void *image_memory_alloc(size_t size) {
 void image_memory_free(void *ptr) {
     if (!ptr) return;
     uint8_t *arena = image_arena();
+    if (!arena) return;
     uintptr_t address = (uintptr_t)ptr;
     uintptr_t start = (uintptr_t)arena + sizeof(ImageAllocHeader);
     uintptr_t end = (uintptr_t)arena + arena_used;
@@ -104,8 +112,10 @@ void *image_memory_realloc(void *ptr, size_t size) {
     ImageAllocHeader *header = (ImageAllocHeader *)ptr - 1;
     if (header->magic != IMAGE_ALLOC_MAGIC || header->free) return 0;
     if (size <= header->size) return ptr;
+    uint8_t *arena = image_arena();
+    if (!arena) return 0;
     uint8_t *next_address = (uint8_t *)(header + 1) + header->size;
-    if (next_address < image_arena() + arena_used) {
+    if (next_address < arena + arena_used) {
         ImageAllocHeader *next = (ImageAllocHeader *)next_address;
         if (next->magic == IMAGE_ALLOC_MAGIC && next->free &&
             (uint64_t)header->size + sizeof(*next) + next->size >= size) {

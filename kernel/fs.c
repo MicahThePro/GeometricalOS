@@ -2,6 +2,7 @@
 #include "ata.h"
 #include "bootinfo.h"
 #include "io.h"
+#include "memmap.h"
 #include "serial.h"
 
 #define FS_LBA           2048u
@@ -38,14 +39,12 @@ _Static_assert(sizeof(Super) <= 512, "GeoFS superblock must fit in one sector");
 static Super *super = (Super *)0x640000;
 static Inode *inodes = (Inode *)0x641000;
 static uint8_t *bitmap = (uint8_t *)0x650000;
-static uint8_t *copy_buffer = (uint8_t *)FS_LARGE_BUFFER_ADDRESS;
+static uint8_t *copy_buffer;
 static int mounted;
 
 static int copy_buffer_available(void) {
-    const BootInfo *info = bootinfo();
-    uint64_t memory_end = 0x100000ull + (uint64_t)info->ext_mem_kb * 1024u;
-    return info->magic == BOOTINFO_MAGIC &&
-           memory_end >= (uint64_t)FS_LARGE_BUFFER_ADDRESS + FS_MAX_FILE_BYTES;
+    if (!copy_buffer) copy_buffer = mem_buffer(FS_LARGE_BUFFER_ADDRESS, FS_MAX_FILE_BYTES);
+    return copy_buffer != 0;
 }
 
 static int bit_get(uint32_t i) {

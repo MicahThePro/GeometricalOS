@@ -6,12 +6,13 @@
 #include "io.h"
 #include "pci.h"
 #include "serial.h"
+#include "xhci.h"
 
 /* Fixed addresses the kernel uses. Bit i of overlap_mask means address i
  * was not inside a usable UEFI region. */
 static const uint32_t watch_addr[] = {
     0x6000u, 0x7000u, 0x7C00u, 0x10000u, 0x12000u,
-    0x80000u, 0x90000u, 0x800000u, 0x1800000u, 0x1100000u
+    0x80000u, 0x90000u, 0u, 0x1800000u, 0x1100000u
 };
 
 static char fixed_line[28][96];
@@ -160,35 +161,6 @@ static const char *compl_name(uint32_t code) {
     }
 }
 
-static void read_legacy(volatile uint8_t *cap, uint32_t *before, uint32_t *before_ctl,
-                        uint32_t *after, uint32_t *after_ctl) {
-    *before = *before_ctl = *after = *after_ctl = 0;
-    uint32_t hcc = *(volatile uint32_t *)(cap + 0x10);
-    uint32_t xecp = (hcc >> 16) & 0xFFFFu;
-    if (!xecp || (xecp << 2) >= 0x8000u) return;
-    uint32_t off = xecp << 2;
-    for (int n = 0; n < 16 && off < 0x8000u; n++) {
-        volatile uint32_t *ext = (volatile uint32_t *)(cap + off);
-        uint32_t v = ext[0];
-        uint32_t id = v & 0xFFu;
-        uint32_t next = (v >> 8) & 0xFFu;
-        if (id == 1) {
-            *before = v;
-            *before_ctl = ext[1];
-            ext[0] = v | (1u << 24);
-            for (int i = 0; i < 200000; i++) {
-                if ((ext[0] & (1u << 16)) == 0) break;
-            }
-            ext[1] = 0xFFFF0000u;
-            *after = ext[0];
-            *after_ctl = ext[1];
-            return;
-        }
-        if (!next) return;
-        off += next << 2;
-    }
-}
-
 static void describe_controller(int index, int bus, int dev, int fn) {
     char line[96];
     int n = 0;
@@ -250,9 +222,19 @@ static void describe_controller(int index, int bus, int dev, int fn) {
     uint32_t hcs2 = *(volatile uint32_t *)(cap + 8);
     uint32_t slots = hcs1 & 0xFFu;
     uint32_t ports = (hcs1 >> 24) & 0xFFu;
-    uint32_t scratch = ((hcs2 >> 16) & 0x3E0u) | ((hcs2 >> 27) & 0x1Fu);
-    uint32_t before, before_ctl, after, after_ctl;
-    read_legacy(cap, &before, &before_ctl, &after, &after_ctl);
+    uint32_t scratch = xhci_scratchpad_count(hcs2);
+    const XhciHandoff *hand = 0;
+    for (int i = 0; i < xhci_handoff_count(); i++) {
+        const XhciHandoff *h = xhci_handoff_at(i);
+        if (h && h->bus == (uint8_t)bus && h->dev == (uint8_t)dev && h->fn == (uint8_t)fn) {
+            hand = h;
+            break;
+        }
+    }
+    uint32_t before = hand ? hand->leg_before : 0;
+    uint32_t before_ctl = hand ? hand->ctl_before : 0;
+    uint32_t after = hand ? hand->leg_after : 0;
+    uint32_t after_ctl = hand ? hand->ctl_after : 0;
 
     n = 0;
     line[n++] = ' ';
@@ -279,19 +261,23 @@ static void describe_controller(int index, int bus, int dev, int fn) {
     line[n] = 0;
     add_line(line);
 
-    n = 0;
-    const char *leg = "  LEG ";
-    while (*leg) line[n++] = *leg++;
-    put_hex8(line, &n, before);
-    line[n++] = '>';
-    put_hex8(line, &n, after);
-    line[n++] = ' ';
-    line[n++] = 'C';
-    put_hex8(line, &n, before_ctl);
-    line[n++] = '>';
-    put_hex8(line, &n, after_ctl);
-    line[n] = 0;
-    add_line(line);
+    if (!hand || !hand->have_leg) {
+        add_line("  LEG none");
+    } else {
+        n = 0;
+        const char *leg = "  LEG ";
+        while (*leg) line[n++] = *leg++;
+        put_hex8(line, &n, before);
+        line[n++] = '>';
+        put_hex8(line, &n, after);
+        line[n++] = ' ';
+        line[n++] = 'C';
+        put_hex8(line, &n, before_ctl);
+        line[n++] = '>';
+        put_hex8(line, &n, after_ctl);
+        line[n] = 0;
+        add_line(line);
+    }
 
     n = 0;
     line[n++] = ' ';
@@ -397,6 +383,12 @@ static void collect_timer(void) {
     p = " ticks ";
     while (*p) line[n++] = *p++;
     put_dec(line, &n, timer_ticks());
+    p = " CLK ";
+    while (*p) line[n++] = *p++;
+    p = timer_source();
+    while (*p && n < 80) line[n++] = *p++;
+    p = timer_hpet_found() ? " hpet Y" : " hpet N";
+    while (*p && n < 90) line[n++] = *p++;
     line[n] = 0;
     add_line(line);
 
@@ -480,8 +472,12 @@ static void collect_memory(void) {
     } else {
         for (int i = 0; i < 10 && n < 88; i++) {
             if ((bi->overlap_mask & (1u << i)) == 0) continue;
+            uint32_t addr = watch_addr[i];
+            if (i == 7) addr = bi->image_arena;
+            if (i == 9) addr = bi->xhci_heap ? bi->xhci_heap : watch_addr[i];
+            if (!addr) continue;
             line[n++] = ' ';
-            put_hex8(line, &n, watch_addr[i]);
+            put_hex8(line, &n, addr);
         }
     }
     line[n] = 0;

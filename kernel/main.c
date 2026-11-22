@@ -14,6 +14,8 @@
 #include "gfx.h"
 #include "diag.h"
 #include "buildid.h"
+#include "memmap.h"
+#include "xhci.h"
 
 #define BOOT_NOT_CHECKED (-100)
 
@@ -201,6 +203,11 @@ void kmain(void) {
         serial_write("graphics init failed\n");
         for (;;) cli_if();
     }
+    /* Calibrate time, then take every xHCI controller away from firmware
+     * SMM before anything reads port 0x60 or 0x64. Enumeration stays off. */
+    timer_calibrate();
+    mem_selftest();
+    xhci_handoff_all();
     input_init();
     if (bi->ext_mem_kb && bi->ext_mem_kb < 7000) {
         AtaDisk none;

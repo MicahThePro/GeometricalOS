@@ -48,7 +48,7 @@ typedef struct {
     EfiTableHeader hdr;
     void *raise_tpl;
     void *restore_tpl;
-    void *allocate_pages;
+    efi_status (*allocate_pages)(uint32_t type, uint32_t memory_type, uintn pages, uint64_t *memory);
     void *free_pages;
     efi_status (*get_memory_map)(uintn *size, void *map, uintn *key, uintn *desc_size, uint32_t *desc_ver);
     void *allocate_pool;
@@ -128,6 +128,7 @@ typedef char conout_ok[(__builtin_offsetof(EfiSystemTable, con_out) == 0x40) ? 1
 typedef char boot_ok[(__builtin_offsetof(EfiSystemTable, boot) == 0x60) ? 1 : -1];
 typedef char locate_ok[(__builtin_offsetof(EfiBootServices, locate_protocol) == 0x140) ? 1 : -1];
 typedef char exit_ok[(__builtin_offsetof(EfiBootServices, exit_boot_services) == 0xE8) ? 1 : -1];
+typedef char alloc_ok[(__builtin_offsetof(EfiBootServices, allocate_pages) == 0x28) ? 1 : -1];
 
 static uint8_t gop_guid[16] = {
     0xDE, 0xA9, 0x42, 0x90, 0xDC, 0x23, 0x38, 0x4A,
@@ -317,6 +318,15 @@ static uint8_t mapbuf[48 * 1024];
 static char fw_vendor_tmp[64];
 static uint32_t fw_rev_tmp, gop_mode_tmp;
 static uint32_t mem_usable, mem_big_base, mem_big_pages, mem_overlap, mem_high_pages;
+static uint32_t ext_kb_final, compact_count, rsdp_saved;
+static uint64_t arena_phys, efi_phys, heap_phys;
+
+typedef struct {
+    uint64_t base;
+    uint64_t length;
+    uint32_t type;
+} CompactEntry;
+static CompactEntry compact[128];
 
 static void copy_vendor(uint16_t *src) {
     int i = 0;
@@ -335,10 +345,10 @@ static int mem_type_usable(uint32_t type) {
     return type == 1 || type == 2 || type == 3 || type == 4 || type == 7;
 }
 
-static void note_memory(uintn map_size, uintn desc_size) {
-    static const uint32_t watch[10] = {
+static void note_memory(uintn map_size, uintn desc_size, uint32_t arena, uint32_t heap) {
+    uint32_t watch[10] = {
         0x6000u, 0x7000u, 0x7C00u, 0x10000u, 0x12000u,
-        0x80000u, 0x90000u, 0x800000u, 0x1800000u, 0x1100000u
+        0x80000u, 0x90000u, arena, 0x1800000u, heap
     };
     uint8_t hit[10];
     for (int i = 0; i < 10; i++) hit[i] = 0;
@@ -370,14 +380,103 @@ static void note_memory(uintn map_size, uintn desc_size) {
         }
         for (int i = 0; i < 10; i++) {
             uint64_t addr = watch[i];
+            if (!addr) continue;
             if (ok && addr >= start && addr < end) hit[i] = 1;
         }
     }
     mem_overlap = 0;
-    for (int i = 0; i < 10; i++) if (!hit[i]) mem_overlap |= 1u << i;
+    for (int i = 0; i < 10; i++) {
+        if (!watch[i]) continue;
+        if (!hit[i]) mem_overlap |= 1u << i;
+    }
 }
 
-static uint32_t save_boot_file(efi_handle image, EfiBootServices *bs) {
+static void sput_hex(uint64_t v) {
+    static const char hex[] = "0123456789ABCDEF";
+    for (int s = 28; s >= 0; s -= 4) sput(hex[(v >> s) & 0xF]);
+}
+
+static int try_reserve(EfiBootServices *bs, uint64_t addr, uintn pages) {
+    uint64_t got = addr;
+    efi_status stt = bs->allocate_pages(2, 2, pages, &got);
+    return (stt || got != addr) ? -1 : 0;
+}
+
+static void reserve_at(EfiBootServices *bs, EfiSystemTable *st, uint64_t addr, uintn pages, const char *name) {
+    if (!try_reserve(bs, addr, pages)) {
+        sputs("EFI: reserved ");
+        sputs(name);
+        sputs("\n");
+        return;
+    }
+    say(st, "GeometricalOS: cannot reserve memory.\r\n");
+    sputs("EFI: reserve failed ");
+    sputs(name);
+    sputs(" ");
+    sput_hex(addr);
+    sputs("\n");
+    for (;;) __asm__ volatile ("hlt");
+}
+
+static uint64_t alloc_under4g(EfiBootServices *bs, uintn pages) {
+    uint64_t got = 0xFFFFFFFFULL;
+    efi_status stt = bs->allocate_pages(1, 2, pages, &got);
+    if (stt || !got || got > 0xFFFFF000ULL) return 0;
+    return got;
+}
+
+static void snapshot_map(uintn map_size, uintn desc_size) {
+    compact_count = 0;
+    uint64_t mem_bytes = 0;
+    if (desc_size) {
+        for (uintn off = 0; off + sizeof(EfiMemDesc) <= map_size && off < sizeof(mapbuf); off += desc_size) {
+            EfiMemDesc *d = (EfiMemDesc *)(mapbuf + off);
+            if (compact_count < 128) {
+                compact[compact_count].base = d->physical;
+                compact[compact_count].length = d->pages * 4096ULL;
+                compact[compact_count].type = d->type;
+                compact_count++;
+            }
+            int usable = d->type == 1 || d->type == 2 || d->type == 3 || d->type == 4 || d->type == 7;
+            if (!usable || d->physical < 0x100000ULL || d->physical >= 0x100000000ULL) continue;
+            uint64_t end = d->physical + d->pages * 4096ULL;
+            if (end > 0x100000000ULL) end = 0x100000000ULL;
+            mem_bytes += end - d->physical;
+        }
+        note_memory(map_size, desc_size, (uint32_t)arena_phys, (uint32_t)heap_phys);
+    }
+    ext_kb_final = (uint32_t)(mem_bytes / 1024ULL);
+    if (ext_kb_final < 65536) ext_kb_final = 65536;
+}
+
+static int guid_eq(const uint8_t *a, const uint8_t *b) {
+    for (int i = 0; i < 16; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static uint32_t find_rsdp(EfiSystemTable *st) {
+    static uint8_t v2[16] = {
+        0x71, 0xE8, 0x68, 0x88, 0xF1, 0xE4, 0xD3, 0x11,
+        0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81
+    };
+    static uint8_t v1[16] = {
+        0x30, 0x2D, 0x9D, 0xEB, 0x88, 0x2D, 0xD3, 0x11,
+        0x9A, 0x16, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D
+    };
+    if (!st->config || !st->entries) return 0;
+    uint8_t *entries = (uint8_t *)st->config;
+    uint32_t acpi1 = 0;
+    for (uintn i = 0; i < st->entries; i++) {
+        uint8_t *g = entries + i * 24u;
+        uint64_t ptr = *(uint64_t *)(g + 16);
+        if (!ptr || ptr > 0xFFFFF000ULL) continue;
+        if (guid_eq(g, v2)) return (uint32_t)ptr;
+        if (guid_eq(g, v1)) acpi1 = (uint32_t)ptr;
+    }
+    return acpi1;
+}
+
+static uint32_t save_boot_file(efi_handle image, EfiBootServices *bs, uint8_t *dst) {
     static uint8_t li_guid[16] = {
         0xA1, 0x31, 0x1B, 0x5B, 0x62, 0x95, 0xD2, 0x11,
         0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B
@@ -408,7 +507,7 @@ static uint32_t save_boot_file(efi_handle image, EfiBootServices *bs) {
     };
     void *file = 0;
     if (((File *)root)->open(root, &file, path, 1, 0) || !file) return 0;
-    uint8_t *dst = (uint8_t *)0x800000;
+    if (!dst) return 0;
     uint32_t got = 0;
     while (got + 4096u <= 512u * 1024u) {
         uintn n = 4096;
@@ -488,40 +587,56 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
     uint64_t nbar = 0;
     uint32_t nsize = 0;
     int have_nvme = find_pci(0x01, 0x08, 0x02, &nbus, &ndev, &nfn, &nbar, &nsize, 0x4000);
-    uint32_t saved_efi = save_boot_file(image, bs);
 
-    uintn map_size = sizeof(mapbuf);
-    uintn map_key = 0, desc_size = 0;
-    uint32_t desc_ver = 0;
-    stt = bs->get_memory_map(&map_size, mapbuf, &map_key, &desc_size, &desc_ver);
-    if (stt) {
-        say(st, "GeometricalOS: memory map failed.\r\n");
-        return 5;
-    }
-    uint64_t mem_bytes = 0;
-    if (desc_size) {
-        for (uintn off = 0; off + sizeof(EfiMemDesc) <= map_size; off += desc_size) {
-            EfiMemDesc *d = (EfiMemDesc *)(mapbuf + off);
-            int usable = d->type == 1 || d->type == 2 || d->type == 3 || d->type == 4 || d->type == 7;
-            if (!usable || d->physical < 0x100000ULL) continue;
-            uint64_t end = d->physical + d->pages * 4096ULL;
-            if (d->physical >= 0x100000000ULL) continue;
-            if (end > 0x100000000ULL) end = 0x100000000ULL;
-            mem_bytes += end - d->physical;
+    reserve_at(bs, st, 0x6000, 1, "bootinfo");
+    reserve_at(bs, st, 0x7000, 1, "trampoline");
+    reserve_at(bs, st, 0x10000, 0x68, "kernel");
+    reserve_at(bs, st, 0x78000, 4, "sound");
+    reserve_at(bs, st, 0x7C000, 5, "stack64");
+    reserve_at(bs, st, 0x8C000, 5, "stack32");
+    if (!try_reserve(bs, 0x1100000, 240)) {
+        heap_phys = 0x1100000;
+        sputs("EFI: reserved usbheap\n");
+    } else {
+        heap_phys = alloc_under4g(bs, 240);
+        if (!heap_phys) {
+            say(st, "GeometricalOS: cannot reserve memory.\r\n");
+            sputs("EFI: reserve failed usbheap\n");
+            for (;;) __asm__ volatile ("hlt");
         }
-        note_memory(map_size, desc_size);
+        sputs("EFI: relocated usbheap ");
+        sput_hex(heap_phys);
+        sputs("\n");
     }
-    uint32_t ext_kb = (uint32_t)(mem_bytes / 1024ULL);
-    if (ext_kb < 65536) ext_kb = 65536;
+    reserve_at(bs, st, 0x1800000, 8, "pages");
 
-    sputs("EFI: exit boot services\n");
-    stt = bs->exit_boot_services(image, map_key);
-    if (stt) {
+    efi_phys = alloc_under4g(bs, 128);
+    uint32_t saved_efi = 0;
+    if (efi_phys) saved_efi = save_boot_file(image, bs, (uint8_t *)efi_phys);
+    arena_phys = alloc_under4g(bs, 3840);
+    rsdp_saved = find_rsdp(st);
+
+    int exited = 0;
+    uintn map_size, map_key, desc_size;
+    uint32_t desc_ver;
+    for (int attempt = 0; attempt < 5; attempt++) {
         map_size = sizeof(mapbuf);
+        map_key = 0;
+        desc_size = 0;
+        desc_ver = 0;
         stt = bs->get_memory_map(&map_size, mapbuf, &map_key, &desc_size, &desc_ver);
-        if (stt) return 6;
+        if (stt) break;
+        snapshot_map(map_size, desc_size);
         stt = bs->exit_boot_services(image, map_key);
-        if (stt) return 7;
+        if (!stt) {
+            exited = 1;
+            break;
+        }
+    }
+    if (!exited) {
+        say(st, "GeometricalOS: memory map failed.\r\n");
+        sputs("EFI: exit boot services failed\n");
+        return 5;
     }
 
     uint64_t image_bytes = (uint64_t)(_binary_bootimg_bin_end - _binary_bootimg_bin_start);
@@ -532,6 +647,12 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
     memcpy((void *)0x10000, _binary_bootimg_bin_start, image_bytes);
 
     build_pages();
+    if (heap_phys >= 0x2000000ULL && heap_phys < 0x100000000ULL) {
+        uint64_t base = heap_phys & ~0x1FFFFFULL;
+        uint32_t gi = (uint32_t)((base >> 30) & 3ULL);
+        uint32_t idx = (uint32_t)((base >> 21) & 0x1FFULL);
+        pd[gi][idx] = base | 0x83ULL | 0x18ULL;
+    }
     uint32_t lfb = map_device(fb, fb_bytes, 0xE0000000u);
     uint32_t xhci = 0;
     if (have_xhci) xhci = map_device(xbar, xsize ? xsize : 0x20000u, 0xF0000000u);
@@ -567,13 +688,13 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
     info[10] = green_pos;
     info[11] = blue_sz;
     info[12] = blue_pos;
-    info[13] = ext_kb;
+    info[13] = ext_kb_final;
     info[14] = 0;
     info[15] = 0;
     info[16] = 0;
     info[17] = xhci;
     info[18] = have_xhci ? (0x80000000u | ((uint32_t)xbus << 16) | ((uint32_t)xdev << 8) | (uint32_t)xfn) : 0;
-    info[19] = saved_efi ? 0x800000u : 0;
+    info[19] = saved_efi ? (uint32_t)efi_phys : 0;
     info[20] = saved_efi;
     info[21] = nvme;
     info[22] = have_nvme ? (0x80000000u | ((uint32_t)nbus << 16) | ((uint32_t)ndev << 8) | (uint32_t)nfn) : 0;
@@ -585,6 +706,21 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
     info[28] = mem_overlap;
     for (int i = 0; i < 64; i++) ((char *)(info + 29))[i] = fw_vendor_tmp[i];
     info[45] = mem_high_pages;
+    info[46] = 0x6100u;
+    info[47] = compact_count;
+    info[48] = (uint32_t)arena_phys;
+    info[49] = arena_phys ? 3840u : 0;
+    info[50] = rsdp_saved;
+    info[51] = (uint32_t)heap_phys;
+    {
+        uint8_t *dst = (uint8_t *)0x6100;
+        for (uint32_t i = 0; i < compact_count; i++) {
+            memcpy(dst, &compact[i].base, 8);
+            memcpy(dst + 8, &compact[i].length, 8);
+            memcpy(dst + 16, &compact[i].type, 4);
+            dst += 20;
+        }
+    }
 
     uint8_t *gdt = (uint8_t *)0x7C00;
     memset(gdt, 0, 64);

@@ -1,4 +1,5 @@
 #include "input.h"
+#include "hpet.h"
 #include "gfx.h"
 #include "io.h"
 #include "vmm.h"
@@ -15,6 +16,16 @@ static uint16_t pit_last;
 static uint16_t pit_div;
 static uint32_t pit_acc;
 static int pit_on;
+static int pit_alive;
+static uint32_t tsc_per_ms;
+static const char *clock_source = "none";
+static int hpet_ok;
+
+static uint64_t rdtsc_now(void) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
 
 static KeyEvent kq[32];
 static int kq_r, kq_w, kq_n;
@@ -60,6 +71,76 @@ static void pit_init(void) {
 }
 
 uint32_t timer_ticks(void) { return ticks; }
+
+const char *timer_source(void) { return clock_source; }
+int timer_pit_alive(void) { return pit_alive; }
+
+void timer_wait_ms(int ms) {
+    if (ms < 1) ms = 1;
+    if (tsc_per_ms) {
+        uint64_t end = rdtsc_now() + (uint64_t)ms * tsc_per_ms;
+        while (rdtsc_now() < end) {}
+        return;
+    }
+    if (hpet_present() && hpet_period()) {
+        uint64_t need = hpet_ticks_for(hpet_period(), (uint32_t)ms);
+        uint64_t start = hpet_counter();
+        if (need) {
+            while (hpet_counter() - start < need) {}
+            return;
+        }
+    }
+    for (int i = 0; i < ms * 200000; i++)
+        __asm__ volatile ("pause");
+}
+
+void timer_calibrate(void) {
+    pit_init();
+    uint16_t first = pit_read();
+    int moved = 0;
+    for (int i = 0; i < 200000; i++) {
+        if (pit_read() != first) { moved = 1; break; }
+    }
+    pit_alive = moved;
+    if (moved) {
+        uint64_t t0 = rdtsc_now();
+        int wraps = 0;
+        uint16_t prev = pit_read();
+        for (int i = 0; i < 20000000 && wraps < 10; i++) {
+            uint16_t now = pit_read();
+            if (now > prev) wraps++;
+            prev = now;
+        }
+        uint64_t t1 = rdtsc_now();
+        if (wraps >= 10 && t1 > t0) {
+            tsc_per_ms = (uint32_t)((t1 - t0) / (uint64_t)(wraps * 10));
+            clock_source = "TSC";
+        }
+    }
+    int hpet = hpet_present();
+    hpet_ok = hpet;
+    if (!tsc_per_ms && hpet && hpet_period()) {
+        uint64_t need = hpet_ticks_for(hpet_period(), 20);
+        uint64_t c0 = hpet_counter();
+        uint64_t t0 = rdtsc_now();
+        if (need) {
+            while (hpet_counter() - c0 < need) {}
+            uint64_t t1 = rdtsc_now();
+            if (t1 > t0) {
+                tsc_per_ms = (uint32_t)((t1 - t0) / 20u);
+                clock_source = "HPET";
+                pit_alive = 0;
+            }
+        }
+    }
+    (void)hpet;
+    serial_write("CLK ");
+    serial_write(clock_source);
+    serial_write(pit_alive ? " pit Y" : " pit N");
+    serial_write(hpet_ok ? " hpet Y\n" : " hpet N\n");
+}
+
+int timer_hpet_found(void) { return hpet_ok; }
 
 void input_timer(void) {
     if (!pit_on || !pit_div) return;
