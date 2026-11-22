@@ -1,6 +1,7 @@
 #include "xhci.h"
 #include "pci.h"
 #include "io.h"
+#include "gfx.h"
 #include "input.h"
 #include "bootinfo.h"
 #include "memmap.h"
@@ -45,12 +46,13 @@ typedef struct {
     int ctrl;
     int slot;
     int dci;
-    int kind; /* 1 keyboard, 2 mouse */
+    int kind; /* 1 keyboard, 2 mouse, 3 absolute tablet */
     int iface;
     Ring ring;
     uint8_t report[64];
     uint8_t prev[8];
     uint32_t mps;
+    uint32_t repeat_at;
     Trb *posted;
 } HidEp;
 
@@ -59,6 +61,30 @@ static int ep_count;
 static char status_line[48] = "No USB chip";
 static int saw_ctl, saw_ports, saw_devs, saw_hubs, last_err, last_code;
 static int last_ep_state = -1, last_dq = -1, last_events, last_speed = -1;
+
+#define USB_MAX 8
+static struct {
+    uint16_t vid, pid;
+    uint8_t cls, speed, state;
+} usb_info[USB_MAX];
+static int usb_info_n;
+
+static void usb_note(uint16_t vid, uint16_t pid, int cls, int speed, int state) {
+    if (usb_info_n >= USB_MAX) return;
+    usb_info[usb_info_n].vid = vid;
+    usb_info[usb_info_n].pid = pid;
+    usb_info[usb_info_n].cls = (uint8_t)cls;
+    usb_info[usb_info_n].speed = (uint8_t)speed;
+    usb_info[usb_info_n].state = (uint8_t)state;
+    usb_info_n++;
+    serial_write("XHCI: dev ");
+    serial_hex32(((uint32_t)vid << 16) | pid);
+    serial_write(" class ");
+    serial_dec((uint32_t)cls);
+    serial_write(" speed ");
+    serial_dec((uint32_t)speed);
+    serial_write(state == 1 ? " ok\n" : state == 4 ? " hub\n" : state == 3 ? " skip\n" : " fail\n");
+}
 
 const char *xhci_status_line(void) { return status_line; }
 
@@ -342,7 +368,8 @@ static int control(Ctrl *hc, Ring *ep0, int slot, uint8_t bm, uint8_t req, uint1
                 if (dir_in && data && len) flush_range(data, len);
                 return 0;
             }
-            recover_ep0(hc, ep0, slot);
+            if (got == 4 || got == 6)
+                recover_ep0(hc, ep0, slot);
             return -1;
         }
         wait_ms(10);
@@ -451,29 +478,29 @@ static int port_reset(Ctrl *hc, int port) {
     }
     wr(psc, (1u << 9) | (1u << 4));
     int speed = -2;
-    for (int i = 0; i < 80; i++) {
+    for (int i = 0; i < 40; i++) {
         wait_ms(10);
         v = rd(psc);
         if ((v & 1u) == 0) return -1;
-        if ((v & (1u << 4)) == 0 && (v & (1u << 1))) {
+        /* PRC (bit 21) and PED (bit 1) both have to be set. */
+        if ((v & (1u << 21)) && (v & (1u << 1))) {
             speed = (int)((v >> 10) & 0xFu);
             break;
         }
     }
     if (speed < 1 && (rd(psc) & 1u)) {
         wr(psc, (1u << 9) | (1u << 31));
-        for (int i = 0; i < 80; i++) {
+        for (int i = 0; i < 40; i++) {
             wait_ms(10);
             v = rd(psc);
             if ((v & 1u) == 0) return -1;
-            if ((v & (1u << 1)) && (v & (1u << 4)) == 0) {
+            if ((v & (1u << 21)) && (v & (1u << 1))) {
                 speed = (int)((v >> 10) & 0xFu);
                 break;
             }
         }
     }
-    if ((v & 1u) == 0 || (v & (1u << 1)) == 0) return -2;
-    if (speed < 1) speed = 3;
+    if ((v & 1u) == 0 || (v & (1u << 1)) == 0 || speed < 1) return -2;
     wr(psc, (v & (1u << 9)) | (1u << 17) | (1u << 18) | (1u << 21));
     return speed;
 }
@@ -652,6 +679,24 @@ static int enumerate_hub(Ctrl *hc, Ring *ep0, int hub_slot, int root_port, uint3
     return 0;
 }
 
+/* Speed ID 1 is full, 2 is low, 3 is high, 4 and above are SuperSpeed. */
+static uint32_t default_mps(int speed) {
+    if (speed == 2) return 8;
+    if (speed == 1 || speed == 3) return 64;
+    if (speed >= 4) return 512;
+    return 64;
+}
+
+static int control_retry(Ctrl *hc, Ring *ep0, int slot, uint8_t bm, uint8_t req, uint16_t val,
+                         uint16_t idx, void *data, uint16_t len, int dir_in, uint32_t *code) {
+    for (int n = 0; n < 3; n++) {
+        if (!control(hc, ep0, slot, bm, req, val, idx, data, len, dir_in, code)) return 0;
+        uint32_t c = code ? *code : 0;
+        if (c != 0 && c != 4 && c != 6) return -1;
+    }
+    return -1;
+}
+
 static int set_ep0_mps(Ctrl *hc, Ring *ep0, int slot, uint8_t *input, uint32_t *ed, uint32_t mps) {
     uint32_t *cd = (uint32_t *)ctx_at(hc, input, 0);
     ed[1] = (3u << 1) | (4u << 3) | (mps << 16);
@@ -686,7 +731,7 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
     memset(output, 0, 32u * hc->ctx_size);
     hc->dcbaa[slot] = (uint64_t)(uintptr_t)output;
     flush_range(&hc->dcbaa[slot], 8);
-    uint32_t mps = speed <= 2 ? 8u : (speed == 3 ? 64u : 512u);
+    uint32_t mps = default_mps(speed);
     uint32_t *cd = (uint32_t *)ctx_at(hc, input, 0);
     cd[1] = (1u << 0) | (1u << 1);
     uint32_t *sd = (uint32_t *)ctx_at(hc, input, 1);
@@ -699,46 +744,21 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
     ed[2] = (uint32_t)(uintptr_t)ep0.trb | 1u;
     ed[4] = 8;
     flush_range(input, 33u * hc->ctx_size);
-    Trb *addr = ring_write(&hc->cmd, (uint32_t)(uintptr_t)input, 0, 0, (11u << 10) | (slot << 24), 1);
+    /* Address Device with BSR=1 does not send SET_ADDRESS yet. */
+    Trb *addr = ring_write(&hc->cmd, (uint32_t)(uintptr_t)input, 0, 0,
+                           (11u << 10) | (1u << 9) | (slot << 24), 1);
     doorbell(hc, 0, 0);
-    if (wait_event(hc, 33, (uint32_t)(uintptr_t)addr, &code, 0, 80) || code != 1) {
+    if (wait_event(hc, 33, (uint32_t)(uintptr_t)addr, &code, 0, 40) || code != 1) {
         rc = -4;
         goto fail;
     }
-    follow_ep0(hc, &ep0, output);
-    /* A transaction error leaves the endpoint halted. The device also needs
-     * a moment after SET_ADDRESS before it answers the next request. */
-    if (last_ep_state >= 2)
-        recover_ep0(hc, &ep0, (int)slot);
-    wait_ms(50);
     last_speed = speed;
-
     memset(desc, 0, 18);
-    static const uint32_t try_mps[] = {8, 64, 512};
-    int got_desc = 0;
-    for (int attempt = 0; attempt < 3 && !got_desc; attempt++) {
-        if (attempt) {
-            recover_ep0(hc, &ep0, (int)slot);
-            wait_ms(20);
-        }
-        if (!control(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code))
-            got_desc = 1;
-    }
-    if (!got_desc) {
-        for (int i = 0; i < 3; i++) {
-            if (try_mps[i] == mps) continue;
-            set_ep0_mps(hc, &ep0, (int)slot, input, ed, try_mps[i]);
-            mps = try_mps[i];
-            if (!control(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code)) {
-                got_desc = 1;
-                break;
-            }
-        }
-    }
-    if (!got_desc) {
+    if (control_retry(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code)) {
         serial_write("XHCI: desc code ");
         serial_dec(code);
         serial_write("\n");
+        usb_note(0, 0, 0, speed, 2);
         last_err = -5;
         last_code = (int)code;
         rc = -5;
@@ -746,13 +766,38 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
     }
     uint32_t packet = desc[7];
     if (speed >= 4 && packet == 9) packet = 512;
-    if (packet != mps && (packet == 8 || packet == 16 || packet == 32 || packet == 64 || packet == 512)) {
-        set_ep0_mps(hc, &ep0, (int)slot, input, ed, packet);
-        mps = packet;
+    if (packet == 8 || packet == 16 || packet == 32 || packet == 64 || packet == 512) {
+        if (packet != mps) {
+            set_ep0_mps(hc, &ep0, (int)slot, input, ed, packet);
+            mps = packet;
+        }
     }
-    if (control(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 18, 1, &code)) { rc = -5; goto fail; }
+    /* Now send SET_ADDRESS. */
+    ed[2] = (uint32_t)(uintptr_t)&ep0.trb[ep0.enqueue] | ep0.cycle;
+    cd[1] = (1u << 0) | (1u << 1);
+    flush_range(input, 33u * hc->ctx_size);
+    addr = ring_write(&hc->cmd, (uint32_t)(uintptr_t)input, 0, 0, (11u << 10) | (slot << 24), 1);
+    doorbell(hc, 0, 0);
+    if (wait_event(hc, 33, (uint32_t)(uintptr_t)addr, &code, 0, 40) || code != 1) {
+        usb_note(0, 0, 0, speed, 2);
+        rc = -4;
+        goto fail;
+    }
+    follow_ep0(hc, &ep0, output);
+    if (control_retry(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 18, 1, &code)) {
+        usb_note(0, 0, 0, speed, 2);
+        rc = -5;
+        goto fail;
+    }
+    uint16_t dev_vid = (uint16_t)(desc[8] | (desc[9] << 8));
+    uint16_t dev_pid = (uint16_t)(desc[10] | (desc[11] << 8));
     int dev_class = desc[4];
     int dev_proto = desc[6];
+    if (dev_class != 0 && dev_class != 3 && dev_class != 9) {
+        usb_note(dev_vid, dev_pid, dev_class, speed, 3);
+        disable_slot(hc, slot);
+        return 0;
+    }
     uint16_t total = 9;
     if (control(hc, &ep0, (int)slot, 0x80, 6, 0x0200, 0, desc, 9, 1, &code)) { rc = -6; goto fail; }
     total = (uint16_t)(desc[2] | (desc[3] << 8));
@@ -778,24 +823,31 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
             uint8_t attr = desc[off + 3];
             int emp = desc[off + 4] | (desc[off + 5] << 8);
             int bint = desc[off + 6];
-            int kind = iproto == 2 ? 2 : 1;
-            if ((addr & 0x80) && (attr & 3) == 3)
+            int kind = 0;
+            if (iclass == 3 && isub == 1 && iproto == 1) kind = 1;
+            else if (iclass == 3 && isub == 1 && iproto == 2) kind = 2;
+            else if (iclass == 3 && iproto == 0 && emp >= 5) kind = 3;
+            if (kind && (addr & 0x80) && (attr & 3) == 3)
                 add_hid(hc, ctrl_i, (int)slot, speed, kind, iface, addr & 0x0F, emp, bint, input);
         }
         off += dl;
     }
     if (is_hub) {
         saw_hubs++;
+        usb_note(dev_vid, dev_pid, 9, speed, 4);
         if (control(hc, &ep0, (int)slot, 0x00, 9, config_val, 0, 0, 0, 0, &code)) { rc = -9; goto fail; }
         enumerate_hub(hc, &ep0, (int)slot, root_port, route, depth, slots, speed, dev_proto == 2, input, output);
         note_status();
         return 0;
     }
     if (ep_count == before) {
+        usb_note(dev_vid, dev_pid, dev_class, speed, 3);
         disable_slot(hc, slot);
         return 0;
     }
+    usb_note(dev_vid, dev_pid, dev_class ? dev_class : 3, speed, 1);
     memcpy(ctx_at(hc, input, 1), ctx_at(hc, output, 0), hc->ctx_size);
+    memcpy(ctx_at(hc, input, 2), ctx_at(hc, output, 1), hc->ctx_size);
     uint32_t *ns = (uint32_t *)ctx_at(hc, input, 1);
     uint32_t max_dci = (ns[0] >> 27) & 0x1F;
     uint32_t add = 1u;
@@ -813,10 +865,13 @@ static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, 
     if (wait_event(hc, 33, (uint32_t)(uintptr_t)conf, &code, 0, 80) || code != 1) { rc = -8; goto fail; }
     if (control(hc, &ep0, (int)slot, 0x00, 9, config_val, 0, 0, 0, 0, &code)) { rc = -9; goto fail; }
     for (int i = before; i < ep_count; i++) {
-        control(hc, &ep0, (int)slot, 0x21, 0x0B, 0, (uint16_t)eps[i].iface, 0, 0, 0, &code);
-        control(hc, &ep0, (int)slot, 0x21, 0x0A, 0, (uint16_t)eps[i].iface, 0, 0, 0, &code);
+        if (eps[i].kind == 1 || eps[i].kind == 2) {
+            control(hc, &ep0, (int)slot, 0x21, 0x0B, 0, (uint16_t)eps[i].iface, 0, 0, 0, &code);
+            control(hc, &ep0, (int)slot, 0x21, 0x0A, 0, (uint16_t)eps[i].iface, 0, 0, 0, &code);
+        }
         arm_interrupt(hc, &eps[i]);
-        serial_write(eps[i].kind == 1 ? "XHCI: keyboard\n" : "XHCI: mouse\n");
+        serial_write(eps[i].kind == 1 ? "XHCI: keyboard\n" :
+                     eps[i].kind == 3 ? "XHCI: tablet\n" : "XHCI: mouse\n");
     }
     note_status();
     return 0;
@@ -840,7 +895,7 @@ static void tlb_flush(void) {
 }
 
 static void force_uc(uint64_t phys) {
-    if (!pages_ready() || phys < 0x2000000ULL || phys >= 0x100000000ULL) return;
+    if (!pages_ready() || phys < 0x200000ULL || phys >= 0x100000000ULL) return;
     uint64_t base = phys & ~0x1FFFFFULL;
     uint32_t gi = (uint32_t)((base >> 30) & 3ULL);
     uint32_t idx = (uint32_t)((base >> 21) & 0x1FFULL);
@@ -880,7 +935,8 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
     Ctrl *hc = &ctrls[ctrl_count];
     memset(hc, 0, sizeof(*hc));
     hc->cap = (volatile uint8_t *)(uintptr_t)mmio;
-    uint8_t caplen = hc->cap[0];
+    uint32_t cap0 = rd((volatile uint32_t *)hc->cap);
+    uint8_t caplen = (uint8_t)cap0;
     if (caplen < 0x10 || caplen > 0x40) return -1;
     hc->op = (volatile uint32_t *)(hc->cap + caplen);
     uint32_t hcs1 = rd((volatile uint32_t *)(hc->cap + 4));
@@ -960,38 +1016,22 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
     if (rd(hc->op + 1) & 1u) return -8;
     hc->alive = 1;
     ctrl_count++;
-    wait_ms(100);
-    uint32_t seen = 0;
-    for (int pass = 0; pass < 2; pass++) {
-        int keyboard = 0;
-        for (int i = 0; i < ep_count; i++) if (eps[i].kind == 1) keyboard = 1;
-        if (keyboard) break;
-        if (pass) wait_ms(200);
-        for (uint32_t p = 0; p < ports; p++) {
-            if (seen & (1u << p)) continue;
-            int speed = port_reset(hc, (int)p);
-            if (speed < 1) continue;
-            /* A port that has dropped out of U0 still answers addressing,
-             * then fails the next transfer with a bus error. */
-            {
-                volatile uint32_t *psc = hc->op + (0x400 / 4) + (int)p * 4;
-                if (((rd(psc) >> 5) & 0xFu) != 0)
-                    wr(psc, (1u << 9) | (1u << 16));
-            }
-            seen |= 1u << p;
-            saw_devs++;
-            serial_write("XHCI: port ");
-            serial_dec(p + 1);
-            serial_write(" speed ");
-            serial_dec((uint32_t)speed);
+    wait_ms(20);
+    for (uint32_t p = 0; p < ports; p++) {
+        int speed = port_reset(hc, (int)p);
+        if (speed < 1) continue;
+        saw_devs++;
+        serial_write("XHCI: port ");
+        serial_dec(p + 1);
+        serial_write(" speed ");
+        serial_dec((uint32_t)speed);
+        serial_write("\n");
+        int rc = enumerate_device(hc, (int)p, speed, 0, 0, 0, slots, 0, 0, 0);
+        if (rc) {
+            last_err = rc;
+            serial_write("XHCI: port error ");
+            serial_dec((uint32_t)(rc < 0 ? -rc : rc));
             serial_write("\n");
-            int rc = enumerate_device(hc, (int)p, speed, 0, 0, 0, slots, 0, 0, 0);
-            if (rc) {
-                last_err = rc;
-                serial_write("XHCI: port error ");
-                serial_dec((uint32_t)(rc < 0 ? -rc : rc));
-                serial_write("\n");
-            }
         }
     }
     note_status();
@@ -1109,14 +1149,10 @@ void xhci_handoff_all(void) {
 }
 
 void xhci_init(void) {
-    /* Resetting this controller turns off the firmware keyboard. The laptop
-     * keys arrive through that firmware path, and our own device reads still
-     * fail with a bus error. Leave the controller running. */
-    set_status("USB firmware");
-    serial_write("XHCI: firmware keyboard\n");
-    return;
+    uint32_t started = timer_ticks();
     ctrl_count = 0;
     ep_count = 0;
+    usb_info_n = 0;
     saw_ctl = saw_ports = saw_devs = saw_hubs = last_err = last_code = 0;
     next_window = 0xF2000000u;
     heap = XHCI_HEAP;
@@ -1180,7 +1216,38 @@ void xhci_init(void) {
     else note_status();
     serial_write("XHCI: ");
     serial_write(status_line);
+    serial_write(" init ms ");
+    serial_dec((timer_ticks() - started) * 10u);
     serial_write("\n");
+}
+
+int xhci_usb_count(void) { return usb_info_n; }
+
+const char *xhci_usb_line(int index) {
+    static char line[48];
+    if (index < 0 || index >= usb_info_n) return "";
+    static const char h[] = "0123456789ABCDEF";
+    const char *st = usb_info[index].state == 1 ? "ok" :
+                     usb_info[index].state == 4 ? "hub" :
+                     usb_info[index].state == 3 ? "skip" : "fail";
+    int n = 0;
+    line[n++] = 'U'; line[n++] = 'S'; line[n++] = 'B'; line[n++] = ' ';
+    uint32_t id = ((uint32_t)usb_info[index].vid << 16) | usb_info[index].pid;
+    for (int s = 28; s >= 0; s -= 4) {
+        if (s == 12) line[n++] = ':';
+        line[n++] = h[(id >> s) & 0xF];
+    }
+    line[n++] = ' ';
+    line[n++] = 'c';
+    line[n++] = h[(usb_info[index].cls >> 4) & 0xF];
+    line[n++] = h[usb_info[index].cls & 0xF];
+    line[n++] = ' ';
+    line[n++] = 's';
+    line[n++] = (char)('0' + (usb_info[index].speed % 10));
+    line[n++] = ' ';
+    for (int i = 0; st[i] && n < 46; i++) line[n++] = st[i];
+    line[n] = 0;
+    return line;
 }
 
 void xhci_poll(void) {
@@ -1203,11 +1270,33 @@ void xhci_poll(void) {
                     else if (eps[i].kind == 2 && eps[i].mps >= 3) {
                         int dx = (int)(int8_t)eps[i].report[1];
                         int dy = (int)(int8_t)eps[i].report[2];
-                        input_post_mouse(dx, dy, eps[i].report[0] & 3);
+                        if (eps[i].mps >= 4 && eps[i].report[3])
+                            dy += (int)(int8_t)eps[i].report[3];
+                        input_post_mouse(dx, dy, eps[i].report[0] & 7);
+                    } else if (eps[i].kind == 3 && eps[i].mps >= 5) {
+                        int x = eps[i].report[1] | (eps[i].report[2] << 8);
+                        int y = eps[i].report[3] | (eps[i].report[4] << 8);
+                        int w = gfx_width() ? gfx_width() : 1;
+                        int h = gfx_height() ? gfx_height() : 1;
+                        input_set_pointer(x * w / 32768, y * h / 32768, eps[i].report[0] & 7);
                     }
                 }
                 arm_interrupt(hc, &eps[i]);
             }
+        }
+        for (int i = 0; i < ep_count; i++) {
+            if (eps[i].ctrl != c || eps[i].kind != 1) continue;
+            uint8_t held = 0;
+            for (int k = 0; k < 6; k++) {
+                uint8_t key = eps[i].report[2 + k];
+                if (key && key < 0xE8) { held = key; break; }
+            }
+            if (!held) { eps[i].repeat_at = 0; continue; }
+            uint32_t now = timer_ticks();
+            if (!eps[i].repeat_at) { eps[i].repeat_at = now + 40; continue; }
+            if ((int32_t)(now - eps[i].repeat_at) < 0) continue;
+            eps[i].repeat_at = now + 8;
+            post_set1(hid_set1[held], 0);
         }
     }
 }

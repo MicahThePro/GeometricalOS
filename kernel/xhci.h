@@ -21,6 +21,8 @@ typedef struct {
 } XhciHandoff;
 
 int xhci_handoff_count(void);
+int xhci_usb_count(void);
+const char *xhci_usb_line(int index);
 const XhciHandoff *xhci_handoff_at(int index);
 const char *xhci_status_line(void);
 void xhci_set_status_line(const char *text);

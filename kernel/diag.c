@@ -497,6 +497,7 @@ static void collect(void) {
     collect_timer();
     collect_steps();
     collect_xhci();
+    for (int i = 0; i < xhci_usb_count(); i++) add_line(xhci_usb_line(i));
     probed = 1;
 }
 
