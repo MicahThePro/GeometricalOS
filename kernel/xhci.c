@@ -5,10 +5,11 @@
 #include "bootinfo.h"
 #include "serial.h"
 
-/* Rings live outside the kernel image so the image still fits below 0x70000.
- * The UEFI loader identity-maps this range. */
+/* Rings live in uncached memory. The UEFI loader marks this page uncached. */
 #define XHCI_HEAP ((uint8_t *)0x1100000)
-#define XHCI_HEAP_SIZE (384u * 1024u)
+#define XHCI_HEAP_SIZE (960u * 1024u)
+#define MAX_CTL 4
+#define MAX_HID 12
 
 typedef struct {
     uint32_t d[4];
@@ -22,34 +23,40 @@ typedef struct {
     uint32_t size;
 } Ring;
 
+typedef struct {
+    volatile uint8_t *cap;
+    volatile uint32_t *op;
+    volatile uint32_t *db;
+    volatile uint32_t *rt;
+    uint32_t ctx_size;
+    uint64_t *dcbaa;
+    Ring cmd;
+    Ring event;
+    int alive;
+} Ctrl;
+
 static uint8_t *heap;
 static uint32_t heap_used;
-static volatile uint8_t *cap;
-static volatile uint32_t *op;
-static volatile uint32_t *db;
-static volatile uint32_t *rt;
-static uint32_t ctx_size;
-static uint64_t *dcbaa;
-static Ring cmd;
-static Ring event;
-static int ready;
+static Ctrl *ctrls;
+static int ctrl_count;
 
 typedef struct {
+    int ctrl;
     int slot;
     int dci;
     int kind; /* 1 keyboard, 2 mouse */
     int iface;
     Ring ring;
-    uint8_t report[16];
-    uint8_t prev[16];
+    uint8_t report[64];
+    uint8_t prev[8];
     uint32_t mps;
     Trb *posted;
 } HidEp;
 
-static HidEp eps[4];
+static HidEp *eps;
 static int ep_count;
 static char status_line[48] = "No USB chip";
-static int saw_controller, saw_ports, saw_devs, saw_hubs, last_err;
+static int saw_ctl, saw_ports, saw_devs, saw_hubs, last_err, last_code;
 
 const char *xhci_status_line(void) { return status_line; }
 
@@ -70,6 +77,19 @@ static void set_status(const char *text) {
     status_line[i] = 0;
 }
 
+static char *put_s(char *p, char *end, const char *s) {
+    while (*s && p < end) *p++ = *s++;
+    return p;
+}
+
+static char *put_u(char *p, char *end, int v) {
+    if (v < 0) v = 0;
+    if (v > 99) v = 99;
+    if (v >= 10 && p < end) *p++ = (char)('0' + v / 10);
+    if (p < end) *p++ = (char)('0' + (v % 10));
+    return p;
+}
+
 static void note_status(void) {
     int keyboard = 0;
     for (int i = 0; i < ep_count; i++) if (eps[i].kind == 1) keyboard = 1;
@@ -79,27 +99,27 @@ static void note_status(void) {
     }
     char text[48];
     char *p = text;
-    const char *prefix = "USB p";
-    while (*prefix) *p++ = *prefix++;
-    *p++ = (char)('0' + (saw_ports > 9 ? 9 : saw_ports));
-    const char *mid = " d";
-    while (*mid) *p++ = *mid++;
-    *p++ = (char)('0' + (saw_devs > 9 ? 9 : saw_devs));
-    mid = " h";
-    while (*mid) *p++ = *mid++;
-    *p++ = (char)('0' + (saw_hubs > 9 ? 9 : saw_hubs));
+    char *end = text + sizeof(text) - 1;
+    p = put_s(p, end, "USB n");
+    p = put_u(p, end, saw_ctl);
+    p = put_s(p, end, " p");
+    p = put_u(p, end, saw_ports);
+    p = put_s(p, end, " d");
+    p = put_u(p, end, saw_devs);
+    p = put_s(p, end, " h");
+    p = put_u(p, end, saw_hubs);
     if (last_err) {
-        mid = " e";
-        while (*mid) *p++ = *mid++;
         int e = last_err < 0 ? -last_err : last_err;
-        if (e > 9) *p++ = (char)('0' + e / 10);
-        *p++ = (char)('0' + e % 10);
+        p = put_s(p, end, " e");
+        p = put_u(p, end, e);
+        p = put_s(p, end, " c");
+        p = put_u(p, end, last_code);
     }
     *p = 0;
     set_status(text);
 }
 
-static int enumerate_device(int root_port, int speed, uint32_t route, int parent_slot,
+static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, int parent_slot,
                             int parent_port, uint32_t slots, int depth, int hub_mtt, int think);
 
 static void *halloc(uint32_t size, uint32_t align) {
@@ -122,7 +142,11 @@ static void wait_ms(int ms) {
     uint32_t need = (uint32_t)(ms / 10);
     if (!need) need = 1;
     uint32_t start = timer_ticks();
-    while (timer_ticks() - start < need) input_timer();
+    for (uint32_t spin = 0; spin < need * 80000u; spin++) {
+        input_timer();
+        if (timer_ticks() - start >= need) break;
+    }
+    input_idle();
 }
 
 static int ring_init(Ring *r, uint32_t n, int with_link) {
@@ -138,44 +162,62 @@ static int ring_init(Ring *r, uint32_t n, int with_link) {
         r->trb[n].d[0] = (uint32_t)(uintptr_t)r->trb;
         r->trb[n].d[3] = (6u << 10) | (1u << 1) | 1u;
     }
+    flush_range(r->trb, count * sizeof(Trb));
     return 0;
 }
 
-static Trb *ring_push(Ring *r, uint32_t a, uint32_t b, uint32_t c, uint32_t flags) {
+static Trb *ring_write(Ring *r, uint32_t a, uint32_t b, uint32_t c, uint32_t flags, int own) {
+    uint32_t cyc = own ? r->cycle : (r->cycle ^ 1u);
     Trb *t = &r->trb[r->enqueue];
     t->d[0] = a;
     t->d[1] = b;
     t->d[2] = c;
-    t->d[3] = flags | r->cycle;
+    t->d[3] = (flags & ~1u) | cyc;
     r->enqueue++;
     if (r->enqueue == r->size) {
-        r->trb[r->size].d[0] = (uint32_t)(uintptr_t)r->trb;
-        r->trb[r->size].d[1] = 0;
-        r->trb[r->size].d[2] = 0;
-        r->trb[r->size].d[3] = (6u << 10) | (1u << 1) | r->cycle;
-    r->enqueue = 0;
-    r->cycle ^= 1u;
+        Trb *link = &r->trb[r->size];
+        link->d[0] = (uint32_t)(uintptr_t)r->trb;
+        link->d[1] = 0;
+        link->d[2] = 0;
+        link->d[3] = (6u << 10) | (1u << 1) | r->cycle;
+        flush_range(link, sizeof(*link));
+        r->enqueue = 0;
+        r->cycle ^= 1u;
     }
     flush_range(t, sizeof(*t));
     return t;
 }
 
-static void erdp_update(void) {
-    uint32_t next = (uint32_t)(uintptr_t)&event.trb[event.dequeue];
-    wr64(rt + (0x38 / 4), next | 8u);
+/* Keep a control transfer on one side of the link so its three TDs stay together. */
+static void ring_reserve(Ring *r, uint32_t need) {
+    if (r->size - r->enqueue >= need) return;
+    Trb *link = &r->trb[r->enqueue];
+    link->d[0] = (uint32_t)(uintptr_t)r->trb;
+    link->d[1] = 0;
+    link->d[2] = 0;
+    link->d[3] = (6u << 10) | (1u << 1) | r->cycle;
+    flush_range(link, sizeof(*link));
+    r->enqueue = 0;
+    r->cycle ^= 1u;
 }
 
-static int event_poll(Trb *out) {
-    Trb *t = &event.trb[event.dequeue];
+static void erdp_update(Ctrl *hc) {
+    uint32_t next = (uint32_t)(uintptr_t)&hc->event.trb[hc->event.dequeue];
+    wr64(hc->rt + (0x18 / 4), next | 8u);
+}
+
+static int event_poll(Ctrl *hc, Trb *out) {
+    Ring *event = &hc->event;
+    Trb *t = &event->trb[event->dequeue];
     flush_range(t, sizeof(*t));
-    if ((t->d[3] & 1u) != event.cycle) return 0;
+    if ((t->d[3] & 1u) != event->cycle) return 0;
     *out = *t;
-    event.dequeue++;
-    if (event.dequeue == event.size) {
-        event.dequeue = 0;
-        event.cycle ^= 1u;
+    event->dequeue++;
+    if (event->dequeue == event->size) {
+        event->dequeue = 0;
+        event->cycle ^= 1u;
     }
-    erdp_update();
+    erdp_update(hc);
     return 1;
 }
 
@@ -187,15 +229,16 @@ static void flush_range(void *p, uint32_t n) {
     __asm__ volatile ("mfence" ::: "memory");
 }
 
-static void doorbell(int slot, uint32_t target) {
-    db[slot] = target;
+static void doorbell(Ctrl *hc, int slot, uint32_t target) {
+    __asm__ volatile ("mfence" ::: "memory");
+    hc->db[slot] = target;
 }
 
-static int wait_event(uint32_t type, uint32_t ptr, uint32_t *code, uint32_t *slot) {
-    for (int i = 0; i < 300; i++) {
+static int wait_event(Ctrl *hc, uint32_t type, uint32_t ptr, uint32_t *code, uint32_t *slot, int spins) {
+    for (int i = 0; i < spins; i++) {
         Trb ev;
-        if (!event_poll(&ev)) {
-            wait_ms(10);
+        if (!event_poll(hc, &ev)) {
+            wait_ms(5);
             continue;
         }
         uint32_t got = (ev.d[3] >> 10) & 0x3Fu;
@@ -208,52 +251,82 @@ static int wait_event(uint32_t type, uint32_t ptr, uint32_t *code, uint32_t *slo
     return -1;
 }
 
-static int control(Ring *ep0, int slot, uint8_t bm, uint8_t req, uint16_t val,
+static void recover_ep0(Ctrl *hc, Ring *ep0, int slot) {
+    uint32_t code = 0;
+    Trb *stop = ring_write(&hc->cmd, 0, 0, 0, (15u << 10) | (1u << 16) | ((uint32_t)slot << 24), 1);
+    doorbell(hc, 0, 0);
+    wait_event(hc, 33, (uint32_t)(uintptr_t)stop, &code, 0, 40);
+    Trb *rst = ring_write(&hc->cmd, 0, 0, 0, (14u << 10) | (1u << 16) | ((uint32_t)slot << 24), 1);
+    doorbell(hc, 0, 0);
+    wait_event(hc, 33, (uint32_t)(uintptr_t)rst, &code, 0, 40);
+    uint32_t ptr = (uint32_t)(uintptr_t)&ep0->trb[ep0->enqueue] | ep0->cycle;
+    Trb *setd = ring_write(&hc->cmd, ptr, 0, 0, (16u << 10) | (1u << 16) | ((uint32_t)slot << 24), 1);
+    doorbell(hc, 0, 0);
+    wait_event(hc, 33, (uint32_t)(uintptr_t)setd, &code, 0, 40);
+}
+
+static int control(Ctrl *hc, Ring *ep0, int slot, uint8_t bm, uint8_t req, uint16_t val,
                    uint16_t idx, void *data, uint16_t len, int dir_in, uint32_t *code) {
+    ring_reserve(ep0, 4);
+    uint32_t saved = ep0->cycle;
     uint32_t setup_lo = (uint32_t)bm | ((uint32_t)req << 8) | ((uint32_t)val << 16);
     uint32_t setup_hi = (uint32_t)idx | ((uint32_t)len << 16);
     uint32_t trt = len ? (dir_in ? 3u : 2u) : 0;
-    /* Bit 6 (IDT) puts the 8-byte setup packet in this TRB. Controllers
-     * and QEMU both require it. */
-    ring_push(ep0, setup_lo, setup_hi, 8, (2u << 10) | (trt << 16) | (1u << 4) | (1u << 6));
+    /* Own bit stays off until the data and status TDs are in memory.
+     * This chip fetches the next TRB the moment the cycle bit flips. */
+    Trb *setup = ring_write(ep0, setup_lo, setup_hi, 8,
+                            (2u << 10) | (trt << 16) | (1u << 4) | (1u << 6), 0);
+    Trb *data_trb = 0;
     if (len) {
         flush_range(data, len);
-        ring_push(ep0, (uint32_t)(uintptr_t)data, 0, len,
-                  (3u << 10) | (1u << 4) | (dir_in ? (1u << 16) : 0));
+        uint32_t dir = dir_in ? ((1u << 16) | (1u << 2)) : 0;
+        data_trb = ring_write(ep0, (uint32_t)(uintptr_t)data, 0, len, (3u << 10) | dir, 1);
     }
-    ring_push(ep0, 0, 0, 0,
-              (4u << 10) | (1u << 5) | ((len && dir_in) ? 0 : (1u << 16)));
-    flush_range(ep0->trb, (ep0->size + 1u) * sizeof(Trb));
-    doorbell(slot, 1);
-    for (int i = 0; i < 100; i++) {
+    Trb *status = ring_write(ep0, 0, 0, 0,
+                             (4u << 10) | (1u << 5) | ((len && dir_in) ? 0 : (1u << 16)), 1);
+    setup->d[3] = (setup->d[3] & ~1u) | saved;
+    flush_range(setup, sizeof(*setup));
+    doorbell(hc, slot, 1);
+    uint32_t want = (uint32_t)(uintptr_t)status;
+    uint32_t data_ptr = data_trb ? (uint32_t)(uintptr_t)data_trb : 0;
+    for (int i = 0; i < 80; i++) {
         Trb ev;
-        if (!event_poll(&ev)) {
-            wait_ms(10);
+        if (!event_poll(hc, &ev)) {
+            wait_ms(5);
             continue;
         }
         uint32_t type = (ev.d[3] >> 10) & 0x3Fu;
         if (type != 32) continue;
         uint32_t got = ev.d[2] >> 24;
+        if (data_ptr && ev.d[0] == data_ptr && ev.d[0] != want) {
+            if (got == 1 || got == 13) continue;
+        }
+        if (ev.d[0] != want) continue;
         if (code) *code = got;
+        last_code = (int)got;
         if ((got == 1 || got == 13) && dir_in && data && len) flush_range(data, len);
-        return (got == 1 || got == 13) ? 0 : -1;
+        if (got == 1 || got == 13) return 0;
+        recover_ep0(hc, ep0, slot);
+        return -1;
     }
     if (code) *code = 0;
+    last_code = 0;
+    recover_ep0(hc, ep0, slot);
     return -1;
 }
 
-static void bios_handoff(void) {
-    uint32_t hcc = rd((volatile uint32_t *)(cap + 0x10));
+static void bios_handoff(Ctrl *hc) {
+    uint32_t hcc = rd((volatile uint32_t *)(hc->cap + 0x10));
     uint32_t xecp = (hcc >> 16) & 0xFFFFu;
     if (!xecp) return;
-    volatile uint32_t *ext = (volatile uint32_t *)(cap + (xecp << 2));
+    volatile uint32_t *ext = (volatile uint32_t *)(hc->cap + (xecp << 2));
     for (int n = 0; n < 16; n++) {
         uint32_t v = rd(ext);
         uint32_t id = v & 0xFFu;
         uint32_t next = (v >> 8) & 0xFFu;
         if (id == 1) {
             wr(ext, v | (1u << 24));
-            for (int i = 0; i < 200; i++) {
+            for (int i = 0; i < 100; i++) {
                 if ((rd(ext) & (1u << 16)) == 0) break;
                 wait_ms(10);
             }
@@ -266,43 +339,65 @@ static void bios_handoff(void) {
     }
 }
 
-static int halt_and_reset(void) {
-    uint32_t cmd = rd(op);
-    wr(op, cmd & ~1u);
-    for (int i = 0; i < 200; i++) {
-        if (rd(op + 1) & 1u) break;
+static int halt_and_reset(Ctrl *hc) {
+    wr(hc->op, rd(hc->op) & ~1u);
+    for (int i = 0; i < 100; i++) {
+        if (rd(hc->op + 1) & 1u) break;
         wait_ms(10);
     }
-    wr(op, rd(op) | 2u);
-    for (int i = 0; i < 200; i++) {
-        if ((rd(op) & 2u) == 0) break;
+    wr(hc->op, rd(hc->op) | 2u);
+    for (int i = 0; i < 100; i++) {
+        if ((rd(hc->op) & 2u) == 0) break;
         wait_ms(10);
     }
-    if (rd(op) & 2u) return -1;
-    for (int i = 0; i < 200; i++) {
-        if ((rd(op + 1) & 0x800u) == 0) return 0;
+    if (rd(hc->op) & 2u) return -1;
+    for (int i = 0; i < 100; i++) {
+        if ((rd(hc->op + 1) & 0x800u) == 0) return 0;
         wait_ms(10);
     }
     return -2;
 }
 
-static int port_reset(int port) {
-    volatile uint32_t *psc = op + (0x400 / 4) + port * 4;
-    wr(psc, (1u << 9));
-    wait_ms(30);
+static int port_reset(Ctrl *hc, int port) {
+    volatile uint32_t *psc = hc->op + (0x400 / 4) + port * 4;
     uint32_t v = rd(psc);
-    if ((v & 1u) == 0) return -1;
+    if ((v & 1u) == 0) {
+        wr(psc, 1u << 9);
+        wait_ms(20);
+        v = rd(psc);
+        if ((v & 1u) == 0) return -1;
+    }
     wr(psc, (1u << 9) | (1u << 4));
-    for (int i = 0; i < 50; i++) {
+    int speed = -2;
+    for (int i = 0; i < 80; i++) {
         wait_ms(10);
         v = rd(psc);
-        if ((v & (1u << 4)) == 0 && (v & (1u << 1))) return (int)((v >> 10) & 0xFu);
+        if ((v & 1u) == 0) return -1;
+        if ((v & (1u << 4)) == 0 && (v & (1u << 1))) {
+            speed = (int)((v >> 10) & 0xFu);
+            break;
+        }
     }
-    return -2;
+    if (speed < 1 && (rd(psc) & 1u)) {
+        wr(psc, (1u << 9) | (1u << 31));
+        for (int i = 0; i < 80; i++) {
+            wait_ms(10);
+            v = rd(psc);
+            if ((v & 1u) == 0) return -1;
+            if ((v & (1u << 1)) && (v & (1u << 4)) == 0) {
+                speed = (int)((v >> 10) & 0xFu);
+                break;
+            }
+        }
+    }
+    if ((v & 1u) == 0 || (v & (1u << 1)) == 0) return -2;
+    if (speed < 1) speed = 3;
+    wr(psc, (v & (1u << 9)) | (1u << 17) | (1u << 18) | (1u << 21));
+    return speed;
 }
 
-static uint8_t *ctx_at(uint8_t *base, int index) {
-    return base + (uint32_t)index * ctx_size;
+static uint8_t *ctx_at(Ctrl *hc, uint8_t *base, int index) {
+    return base + (uint32_t)index * hc->ctx_size;
 }
 
 static const uint8_t hid_set1[256] = {
@@ -339,11 +434,11 @@ static void hid_keyboard(HidEp *ep) {
         if (!k) continue;
         int still = 0;
         for (int j = 0; j < 6; j++) if (ep->report[2 + j] == k) still = 1;
-        if (!still) post_set1(hid_set1[k], 1);
+        if (!still && k < 0xE8) post_set1(hid_set1[k], 1);
     }
     for (int j = 0; j < 6; j++) {
         uint8_t k = ep->report[2 + j];
-        if (!k || k == 1) continue;
+        if (!k || k == 1 || k >= 0xE8) continue;
         int was = 0;
         for (int i = 0; i < 6; i++) if (ep->prev[2 + i] == k) was = 1;
         if (!was) post_set1(hid_set1[k], 0);
@@ -364,73 +459,96 @@ static int interval_of(int speed, int bint) {
     return v;
 }
 
-static int add_hid(int slot, int speed, int kind, int iface, int epnum, int mps, int bint,
-                   uint8_t *input, uint8_t *output) {
-    if (ep_count >= 4 || mps < 1 || mps > 16) return -1;
+static int add_hid(Ctrl *hc, int ctrl_i, int slot, int speed, int kind, int iface, int epnum, int mps, int bint,
+                   uint8_t *input) {
+    if (ep_count >= MAX_HID || mps < 1 || mps > 64) return -1;
     HidEp *ep = &eps[ep_count];
     memset(ep, 0, sizeof(*ep));
+    ep->ctrl = ctrl_i;
     ep->slot = slot;
     ep->kind = kind;
     ep->iface = iface;
     ep->mps = (uint32_t)mps;
     ep->dci = epnum * 2 + 1;
     if (ring_init(&ep->ring, 16, 1)) return -1;
-    uint8_t *sctx = ctx_at(input, 1);
+    uint8_t *sctx = ctx_at(hc, input, 1);
     uint32_t *sd = (uint32_t *)sctx;
     uint32_t entries = (uint32_t)ep->dci;
     if (((sd[0] >> 27) & 0x1F) < entries) sd[0] = (sd[0] & ~(0x1Fu << 27)) | (entries << 27);
-    uint32_t *cd = (uint32_t *)ctx_at(input, 0);
+    uint32_t *cd = (uint32_t *)ctx_at(hc, input, 0);
     cd[1] |= 1u << ep->dci;
-    uint32_t *ed = (uint32_t *)ctx_at(input, ep->dci + 1);
-    memset(ed, 0, ctx_size);
+    uint32_t *ed = (uint32_t *)ctx_at(hc, input, ep->dci + 1);
+    memset(ed, 0, hc->ctx_size);
     ed[0] = (uint32_t)interval_of(speed, bint) << 16;
     ed[1] = (3u << 1) | (7u << 3) | ((uint32_t)mps << 16);
     ed[2] = (uint32_t)(uintptr_t)ep->ring.trb | 1u;
     ed[4] = (uint32_t)mps | ((uint32_t)mps << 16);
-    (void)output;
-    (void)iface;
     ep_count++;
     return 0;
 }
 
-static void arm_interrupt(HidEp *ep) {
+static void arm_interrupt(Ctrl *hc, HidEp *ep) {
     memset(ep->report, 0, sizeof(ep->report));
-    ep->posted = ring_push(&ep->ring, (uint32_t)(uintptr_t)ep->report, 0, ep->mps,
-                           (1u << 10) | (1u << 5));
-    doorbell(ep->slot, (uint32_t)ep->dci);
+    ep->posted = ring_write(&ep->ring, (uint32_t)(uintptr_t)ep->report, 0, ep->mps, (1u << 10) | (1u << 5), 1);
+    doorbell(hc, ep->slot, (uint32_t)ep->dci);
 }
 
-static void enumerate_hub(Ring *ep0, int hub_slot, int root_port, uint32_t route, int depth,
-                           uint32_t slots, int hub_speed, int hub_mtt) {
+static void disable_slot(Ctrl *hc, uint32_t slot) {
+    if (!slot) return;
+    uint32_t code = 0;
+    Trb *t = ring_write(&hc->cmd, 0, 0, 0, (10u << 10) | (slot << 24), 1);
+    doorbell(hc, 0, 0);
+    wait_event(hc, 33, (uint32_t)(uintptr_t)t, &code, 0, 40);
+}
+
+static int mark_hub(Ctrl *hc, int slot, int ports, uint8_t *input, uint8_t *output) {
+    memcpy(ctx_at(hc, input, 1), ctx_at(hc, output, 0), hc->ctx_size);
+    uint32_t *sd = (uint32_t *)ctx_at(hc, input, 1);
+    uint32_t *cd = (uint32_t *)ctx_at(hc, input, 0);
+    sd[0] |= 1u << 26;
+    sd[1] = (sd[1] & 0x00FFFFFFu) | ((uint32_t)ports << 24);
+    cd[0] = 0;
+    cd[1] = 1u;
+    flush_range(input, 33u * hc->ctx_size);
+    uint32_t code = 0;
+    Trb *eval = ring_write(&hc->cmd, (uint32_t)(uintptr_t)input, 0, 0, (13u << 10) | ((uint32_t)slot << 24), 1);
+    doorbell(hc, 0, 0);
+    if (wait_event(hc, 33, (uint32_t)(uintptr_t)eval, &code, 0, 80) || code != 1) return -1;
+    return 0;
+}
+
+static int enumerate_hub(Ctrl *hc, Ring *ep0, int hub_slot, int root_port, uint32_t route, int depth,
+                          uint32_t slots, int hub_speed, int hub_mtt, uint8_t *input, uint8_t *output) {
     uint32_t code = 0;
     uint8_t *hub = halloc(16, 64);
     uint8_t *st = halloc(8, 64);
-    if (!hub || !st) return;
-    if (control(ep0, hub_slot, 0xA0, 6, 0x2900, 0, hub, 9, 1, &code) || (code != 1 && code != 13)) {
+    if (!hub || !st) return -1;
+    if (control(hc, ep0, hub_slot, 0xA0, 6, 0x2900, 0, hub, 9, 1, &code)) {
         serial_write("XHCI: hub descriptor failed\n");
-        return;
+        return -1;
     }
     int ports = hub[2];
     int think = (hub[3] >> 5) & 3;
-    if (ports > 8) ports = 8;
-    if (ports < 1) return;
+    if (ports > 15) ports = 15;
+    if (ports < 1) return -1;
+    mark_hub(hc, hub_slot, ports, input, output);
     serial_write("XHCI: hub ports ");
     serial_dec((uint32_t)ports);
     serial_write("\n");
     for (int p = 1; p <= ports; p++)
-        control(ep0, hub_slot, 0x23, 3, 8, (uint16_t)p, 0, 0, 0, &code);
+        control(hc, ep0, hub_slot, 0x23, 3, 8, (uint16_t)p, 0, 0, 0, &code);
     wait_ms(100);
     for (int p = 1; p <= ports; p++) {
         memset(st, 0, 4);
-        if (control(ep0, hub_slot, 0xA3, 0, 0, (uint16_t)p, st, 4, 1, &code)) continue;
+        if (control(hc, ep0, hub_slot, 0xA3, 0, 0, (uint16_t)p, st, 4, 1, &code)) continue;
         uint16_t w = (uint16_t)(st[0] | (st[1] << 8));
         if ((w & 1u) == 0) continue;
-        control(ep0, hub_slot, 0x23, 3, 4, (uint16_t)p, 0, 0, 0, &code);
+        control(hc, ep0, hub_slot, 0x23, 3, 4, (uint16_t)p, 0, 0, 0, &code);
         int child_speed = 1;
-        for (int t = 0; t < 30; t++) {
+        for (int t = 0; t < 20; t++) {
             wait_ms(10);
             memset(st, 0, 4);
-            if (control(ep0, hub_slot, 0xA3, 0, 0, (uint16_t)p, st, 4, 1, &code)) break;
+            if (control(hc, ep0, hub_slot, 0xA3, 0, 0, (uint16_t)p, st, 4, 1, &code)) break;
             w = (uint16_t)(st[0] | (st[1] << 8));
             if (w & (1u << 4)) continue;
             if (w & (1u << 9)) child_speed = 2;
@@ -438,9 +556,9 @@ static void enumerate_hub(Ring *ep0, int hub_slot, int root_port, uint32_t route
             else child_speed = 1;
             break;
         }
-        control(ep0, hub_slot, 0x23, 1, 20, (uint16_t)p, 0, 0, 0, &code);
+        control(hc, ep0, hub_slot, 0x23, 1, 20, (uint16_t)p, 0, 0, 0, &code);
         if ((w & 1u) == 0) continue;
-        uint32_t child_route = route | ((uint32_t)p << (depth * 4));
+        uint32_t child_route = route | ((uint32_t)(p & 0xF) << (depth * 4));
         int parent = 0, parent_port_num = 0;
         if (hub_speed >= 3 && child_speed < 3) {
             parent = hub_slot;
@@ -449,86 +567,104 @@ static void enumerate_hub(Ring *ep0, int hub_slot, int root_port, uint32_t route
         serial_write("XHCI: hub device port ");
         serial_dec((uint32_t)p);
         serial_write("\n");
-        enumerate_device(root_port, child_speed, child_route, parent, parent_port_num,
+        enumerate_device(hc, root_port, child_speed, child_route, parent, parent_port_num,
                          slots, depth + 1, hub_mtt, think);
     }
+    return 0;
 }
 
-static int enumerate_device(int root_port, int speed, uint32_t route, int parent_slot,
+static int set_ep0_mps(Ctrl *hc, Ring *ep0, int slot, uint8_t *input, uint32_t *ed, uint32_t mps) {
+    uint32_t *cd = (uint32_t *)ctx_at(hc, input, 0);
+    ed[1] = (3u << 1) | (4u << 3) | (mps << 16);
+    ed[2] = (uint32_t)(uintptr_t)&ep0->trb[ep0->enqueue] | ep0->cycle;
+    cd[0] = 0;
+    cd[1] = 1u << 1;
+    flush_range(input, 33u * hc->ctx_size);
+    uint32_t code = 0;
+    Trb *eval = ring_write(&hc->cmd, (uint32_t)(uintptr_t)input, 0, 0, (13u << 10) | ((uint32_t)slot << 24), 1);
+    doorbell(hc, 0, 0);
+    wait_event(hc, 33, (uint32_t)(uintptr_t)eval, &code, 0, 80);
+    return (int)code;
+}
+
+static int enumerate_device(Ctrl *hc, int root_port, int speed, uint32_t route, int parent_slot,
                             int parent_port, uint32_t slots, int depth, int hub_mtt, int think) {
-    if (depth > 3) return 0;
+    if (depth > 4) return 0;
+    int ctrl_i = (int)(hc - ctrls);
     uint32_t code = 0, slot = 0;
-    Trb *enable = ring_push(&cmd, 0, 0, 0, 9u << 10);
-    doorbell(0, 0);
-    if (wait_event(33, (uint32_t)(uintptr_t)enable, &code, &slot) || code != 1 || !slot || slot > slots)
+    Trb *enable = ring_write(&hc->cmd, 0, 0, 0, 9u << 10, 1);
+    doorbell(hc, 0, 0);
+    if (wait_event(hc, 33, (uint32_t)(uintptr_t)enable, &code, &slot, 80) || code != 1 || !slot || slot > slots)
         return -1;
+    int rc = 0;
     Ring ep0;
-    if (ring_init(&ep0, 16, 1)) return -2;
-    uint8_t *input = halloc(33u * ctx_size, 64);
-    uint8_t *output = halloc(32u * ctx_size, 64);
-    if (!input || !output) return -3;
-    memset(input, 0, 33u * ctx_size);
-    memset(output, 0, 32u * ctx_size);
-    dcbaa[slot] = (uint64_t)(uintptr_t)output;
-    uint32_t mps = speed <= 2 ? 8 : (speed >= 4 ? 512 : 64);
-    uint32_t *cd = (uint32_t *)ctx_at(input, 0);
+    if (ring_init(&ep0, 16, 1)) { rc = -2; goto fail; }
+    uint8_t *input = halloc(33u * hc->ctx_size, 64);
+    uint8_t *output = halloc(32u * hc->ctx_size, 64);
+    uint8_t *desc = halloc(256, 64);
+    if (!input || !output || !desc) { rc = -3; goto fail; }
+    memset(input, 0, 33u * hc->ctx_size);
+    memset(output, 0, 32u * hc->ctx_size);
+    hc->dcbaa[slot] = (uint64_t)(uintptr_t)output;
+    flush_range(&hc->dcbaa[slot], 8);
+    uint32_t mps = speed <= 2 ? 8u : (speed == 3 ? 64u : 512u);
+    uint32_t *cd = (uint32_t *)ctx_at(hc, input, 0);
     cd[1] = (1u << 0) | (1u << 1);
-    uint32_t *sd = (uint32_t *)ctx_at(input, 1);
-    sd[0] = (route & 0xFFFFFu) | ((uint32_t)speed << 20) | (1u << 27);
+    uint32_t *sd = (uint32_t *)ctx_at(hc, input, 1);
+    sd[0] = (route & 0xFFFFFu) | ((uint32_t)(speed & 0xF) << 20) | (1u << 27);
     if (parent_slot && hub_mtt) sd[0] |= 1u << 25;
     sd[1] = (uint32_t)(root_port + 1) << 16;
     sd[2] = (uint32_t)parent_slot | ((uint32_t)parent_port << 8) | ((uint32_t)think << 16);
-    uint32_t *ed = (uint32_t *)ctx_at(input, 2);
+    uint32_t *ed = (uint32_t *)ctx_at(hc, input, 2);
     ed[1] = (3u << 1) | (4u << 3) | (mps << 16);
     ed[2] = (uint32_t)(uintptr_t)ep0.trb | 1u;
     ed[4] = 8;
-    Trb *addr = ring_push(&cmd, (uint32_t)(uintptr_t)input, 0, 0, (11u << 10) | (slot << 24));
-    doorbell(0, 0);
-    if (wait_event(33, (uint32_t)(uintptr_t)addr, &code, 0) || code != 1) return -4;
+    flush_range(input, 33u * hc->ctx_size);
+    Trb *addr = ring_write(&hc->cmd, (uint32_t)(uintptr_t)input, 0, 0, (11u << 10) | (slot << 24), 1);
+    doorbell(hc, 0, 0);
+    if (wait_event(hc, 33, (uint32_t)(uintptr_t)addr, &code, 0, 80) || code != 1) {
+        rc = -4;
+        goto fail;
+    }
 
-    uint8_t *desc = halloc(256, 64);
-    if (!desc) return -5;
-    memset(desc, 0, 256);
-    if (control(&ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code) || (code != 1 && code != 13)) {
-        /* Full-speed devices need 8-byte packets. High-speed devices stall
-         * on that, so try the 64-byte size before giving up. */
-        ed[1] = (3u << 1) | (4u << 3) | (64u << 16);
-        cd[0] = 0;
-        cd[1] = 1u << 1;
-        Trb *eval = ring_push(&cmd, (uint32_t)(uintptr_t)input, 0, 0, (13u << 10) | (slot << 24));
-        doorbell(0, 0);
-        wait_event(33, (uint32_t)(uintptr_t)eval, &code, 0);
-        if (control(&ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code) || (code != 1 && code != 13)) {
-            serial_write("XHCI: desc code ");
-            serial_dec(code);
-            serial_write("\n");
-            last_err = -5;
-            return -5;
+    memset(desc, 0, 18);
+    static const uint32_t try_mps[] = {8, 64, 512};
+    int got_desc = 0;
+    if (!control(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code)) got_desc = 1;
+    if (!got_desc) {
+        for (int i = 0; i < 3; i++) {
+            if (try_mps[i] == mps) continue;
+            set_ep0_mps(hc, &ep0, (int)slot, input, ed, try_mps[i]);
+            mps = try_mps[i];
+            if (!control(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 8, 1, &code)) {
+                got_desc = 1;
+                break;
+            }
         }
-        mps = 64;
+    }
+    if (!got_desc) {
+        serial_write("XHCI: desc code ");
+        serial_dec(code);
+        serial_write("\n");
+        last_err = -5;
+        last_code = (int)code;
+        rc = -5;
+        goto fail;
     }
     uint32_t packet = desc[7];
     if (speed >= 4 && packet == 9) packet = 512;
     if (packet != mps && (packet == 8 || packet == 16 || packet == 32 || packet == 64 || packet == 512)) {
-        ed[1] = (3u << 1) | (4u << 3) | (packet << 16);
-        cd[0] = 0;
-        cd[1] = 1u << 1;
-        Trb *eval = ring_push(&cmd, (uint32_t)(uintptr_t)input, 0, 0, (13u << 10) | (slot << 24));
-        doorbell(0, 0);
-        wait_event(33, (uint32_t)(uintptr_t)eval, &code, 0);
+        set_ep0_mps(hc, &ep0, (int)slot, input, ed, packet);
         mps = packet;
     }
-    if (control(&ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 18, 1, &code) || (code != 1 && code != 13))
-        return -5;
+    if (control(hc, &ep0, (int)slot, 0x80, 6, 0x0100, 0, desc, 18, 1, &code)) { rc = -5; goto fail; }
     int dev_class = desc[4];
     int dev_proto = desc[6];
     uint16_t total = 9;
-    if (control(&ep0, (int)slot, 0x80, 6, 0x0200, 0, desc, 9, 1, &code) || (code != 1 && code != 13))
-        return -6;
+    if (control(hc, &ep0, (int)slot, 0x80, 6, 0x0200, 0, desc, 9, 1, &code)) { rc = -6; goto fail; }
     total = (uint16_t)(desc[2] | (desc[3] << 8));
     if (total < 9 || total > 256) total = 256;
-    if (control(&ep0, (int)slot, 0x80, 6, 0x0200, 0, desc, total, 1, &code) || (code != 1 && code != 13))
-        return -7;
+    if (control(hc, &ep0, (int)slot, 0x80, 6, 0x0200, 0, desc, total, 1, &code)) { rc = -7; goto fail; }
     uint8_t config_val = desc[5];
     int iface = 0, iclass = 0, isub = 0, iproto = 0;
     int is_hub = dev_class == 9;
@@ -543,6 +679,7 @@ static int enumerate_device(int root_port, int speed, uint32_t route, int parent
             isub = desc[off + 6];
             iproto = desc[off + 7];
             if (iclass == 9) is_hub = 1;
+            (void)isub;
         } else if (dt == 5 && dl >= 7 && iclass == 3) {
             uint8_t addr = desc[off + 2];
             uint8_t attr = desc[off + 3];
@@ -550,21 +687,23 @@ static int enumerate_device(int root_port, int speed, uint32_t route, int parent
             int bint = desc[off + 6];
             int kind = iproto == 2 ? 2 : 1;
             if ((addr & 0x80) && (attr & 3) == 3)
-                add_hid((int)slot, speed, kind, iface, addr & 0x0F, emp, bint, input, output);
+                add_hid(hc, ctrl_i, (int)slot, speed, kind, iface, addr & 0x0F, emp, bint, input);
         }
         off += dl;
     }
     if (is_hub) {
         saw_hubs++;
-        if (control(&ep0, (int)slot, 0x00, 9, config_val, 0, 0, 0, 0, &code) || code != 1)
-            return -9;
-        enumerate_hub(&ep0, (int)slot, root_port, route, depth, slots, speed, dev_proto == 2);
+        if (control(hc, &ep0, (int)slot, 0x00, 9, config_val, 0, 0, 0, 0, &code)) { rc = -9; goto fail; }
+        enumerate_hub(hc, &ep0, (int)slot, root_port, route, depth, slots, speed, dev_proto == 2, input, output);
         note_status();
         return 0;
     }
-    if (ep_count == before) return 0;
-    memcpy(ctx_at(input, 1), ctx_at(output, 0), ctx_size);
-    uint32_t *ns = (uint32_t *)ctx_at(input, 1);
+    if (ep_count == before) {
+        disable_slot(hc, slot);
+        return 0;
+    }
+    memcpy(ctx_at(hc, input, 1), ctx_at(hc, output, 0), hc->ctx_size);
+    uint32_t *ns = (uint32_t *)ctx_at(hc, input, 1);
     uint32_t max_dci = (ns[0] >> 27) & 0x1F;
     uint32_t add = 1u;
     for (int i = before; i < ep_count; i++) {
@@ -572,70 +711,118 @@ static int enumerate_device(int root_port, int speed, uint32_t route, int parent
         add |= 1u << eps[i].dci;
     }
     ns[0] = (ns[0] & ~(0x1Fu << 27)) | (max_dci << 27);
-    cd = (uint32_t *)ctx_at(input, 0);
+    cd = (uint32_t *)ctx_at(hc, input, 0);
     cd[0] = 0;
     cd[1] = add;
-    Trb *conf = ring_push(&cmd, (uint32_t)(uintptr_t)input, 0, 0, (12u << 10) | (slot << 24));
-    doorbell(0, 0);
-    if (wait_event(33, (uint32_t)(uintptr_t)conf, &code, 0) || code != 1) return -8;
-    if (control(&ep0, (int)slot, 0x00, 9, config_val, 0, 0, 0, 0, &code) || code != 1) return -9;
+    flush_range(input, 33u * hc->ctx_size);
+    Trb *conf = ring_write(&hc->cmd, (uint32_t)(uintptr_t)input, 0, 0, (12u << 10) | (slot << 24), 1);
+    doorbell(hc, 0, 0);
+    if (wait_event(hc, 33, (uint32_t)(uintptr_t)conf, &code, 0, 80) || code != 1) { rc = -8; goto fail; }
+    if (control(hc, &ep0, (int)slot, 0x00, 9, config_val, 0, 0, 0, 0, &code)) { rc = -9; goto fail; }
     for (int i = before; i < ep_count; i++) {
-        control(&ep0, (int)slot, 0x21, 0x0B, 0, (uint16_t)eps[i].iface, 0, 0, 0, &code);
-        control(&ep0, (int)slot, 0x21, 0x0A, 0, (uint16_t)eps[i].iface, 0, 0, 0, &code);
-        arm_interrupt(&eps[i]);
+        control(hc, &ep0, (int)slot, 0x21, 0x0B, 0, (uint16_t)eps[i].iface, 0, 0, 0, &code);
+        control(hc, &ep0, (int)slot, 0x21, 0x0A, 0, (uint16_t)eps[i].iface, 0, 0, 0, &code);
+        arm_interrupt(hc, &eps[i]);
         serial_write(eps[i].kind == 1 ? "XHCI: keyboard\n" : "XHCI: mouse\n");
     }
     note_status();
     return 0;
+fail:
+    if (!last_err) last_err = rc;
+    disable_slot(hc, slot);
+    return rc;
+}
+
+static int pages_ready(void) {
+    uint32_t cr0, cr3;
+    __asm__ volatile ("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    return (cr0 & 0x80000000u) && (cr3 & ~0xFFFu) == 0x1800000u;
+}
+
+static void tlb_flush(void) {
+    uint32_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile ("mov %0, %%cr3" :: "r"(cr3) : "memory");
+}
+
+static void force_uc(uint64_t phys) {
+    if (!pages_ready() || phys < 0x2000000ULL || phys >= 0x100000000ULL) return;
+    uint64_t base = phys & ~0x1FFFFFULL;
+    uint32_t gi = (uint32_t)((base >> 30) & 3ULL);
+    uint32_t idx = (uint32_t)((base >> 21) & 0x1FFULL);
+    volatile uint64_t *pd = (volatile uint64_t *)(0x1802000u + gi * 4096u);
+    pd[idx] = base | 0x83ULL | 0x18ULL;
+    tlb_flush();
+}
+
+static uint32_t next_window = 0xF2000000u;
+
+static uint32_t map_high_bar(uint64_t phys) {
+    if (!pages_ready() || next_window >= 0xF8000000u) return 0;
+    uint64_t base = phys & ~0x1FFFFFULL;
+    uint32_t off = (uint32_t)(phys - base);
+    uint32_t window = next_window;
+    next_window += 0x400000u;
+    volatile uint64_t *pd = (volatile uint64_t *)0x1805000;
+    uint32_t idx = (window >> 21) & 0x1FF;
+    pd[idx] = base | 0x83ULL | 0x18ULL;
+    pd[idx + 1] = (base + 0x200000ULL) | 0x83ULL | 0x18ULL;
+    tlb_flush();
+    return window + off;
+}
+
+static int same_controller(int bus, int dev, int fn) {
+    const BootInfo *bi = bootinfo();
+    if (!(bi->magic == BOOTINFO_MAGIC && (bi->xhci_pci & 0x80000000u))) return 0;
+    return bus == (int)((bi->xhci_pci >> 16) & 0xFF) &&
+           dev == (int)((bi->xhci_pci >> 8) & 0x1F) &&
+           fn == (int)(bi->xhci_pci & 7);
 }
 
 static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
+    if (ctrl_count >= MAX_CTL || !mmio) return -1;
     uint16_t cmdreg = (uint16_t)pci_read(bus, dev, fn, 4);
     pci_write16(bus, dev, fn, 4, (uint16_t)(cmdreg | 0x06));
-    heap = XHCI_HEAP;
-    heap_used = 0;
-    memset(heap, 0, XHCI_HEAP_SIZE);
-    cap = (volatile uint8_t *)(uintptr_t)mmio;
-    uint8_t caplen = cap[0];
-    op = (volatile uint32_t *)(cap + caplen);
-    uint32_t hcs1 = rd((volatile uint32_t *)(cap + 4));
-    uint32_t hcs2 = rd((volatile uint32_t *)(cap + 8));
-    uint32_t hcc = rd((volatile uint32_t *)(cap + 0x10));
-    uint32_t dboff = rd((volatile uint32_t *)(cap + 0x14));
-    uint32_t rtsoff = rd((volatile uint32_t *)(cap + 0x18));
-    db = (volatile uint32_t *)(cap + dboff);
-    rt = (volatile uint32_t *)(cap + rtsoff + 0x20);
-    ctx_size = (hcc & 4u) ? 64u : 32u;
+    Ctrl *hc = &ctrls[ctrl_count];
+    memset(hc, 0, sizeof(*hc));
+    hc->cap = (volatile uint8_t *)(uintptr_t)mmio;
+    uint8_t caplen = hc->cap[0];
+    if (caplen < 0x10 || caplen > 0x40) return -1;
+    hc->op = (volatile uint32_t *)(hc->cap + caplen);
+    uint32_t hcs1 = rd((volatile uint32_t *)(hc->cap + 4));
+    uint32_t hcs2 = rd((volatile uint32_t *)(hc->cap + 8));
+    uint32_t hcc = rd((volatile uint32_t *)(hc->cap + 0x10));
+    uint32_t dboff = rd((volatile uint32_t *)(hc->cap + 0x14));
+    uint32_t rtsoff = rd((volatile uint32_t *)(hc->cap + 0x18));
+    if (dboff < 0x100 || rtsoff < 0x100) return -1;
+    hc->db = (volatile uint32_t *)(hc->cap + dboff);
+    hc->rt = (volatile uint32_t *)(hc->cap + rtsoff + 0x20);
+    hc->ctx_size = (hcc & 4u) ? 64u : 32u;
     uint32_t slots = hcs1 & 0xFFu;
     uint32_t ports = (hcs1 >> 24) & 0xFFu;
-    if (!slots || !ports || caplen < 0x10) {
-        set_status("USB regs bad");
-        return -1;
-    }
-    saw_controller = 1;
-    saw_ports = (int)ports;
+    if (!slots || !ports) return -1;
     if (slots > 64) slots = 64;
     if (ports > 32) ports = 32;
-    serial_write("XHCI: slots ");
+    saw_ctl++;
+    saw_ports += (int)ports;
+    serial_write("XHCI: mmio ");
+    serial_hex32(mmio);
+    serial_write(" slots ");
     serial_dec(slots);
     serial_write(" ports ");
     serial_dec(ports);
     serial_write("\n");
-    bios_handoff();
-    if (halt_and_reset()) {
+    bios_handoff(hc);
+    if (halt_and_reset(hc)) {
         serial_write("XHCI: reset failed\n");
-        set_status("USB reset failed");
         return -2;
     }
-    if ((rd(op + 2) & 1u) == 0) {
-        serial_write("XHCI: page size\n");
-        return -3;
-    }
-    /* The high and low scratchpad fields are swapped in the register. */
+    if ((rd(hc->op + 2) & 1u) == 0) return -3;
     uint32_t scratch = ((hcs2 >> 16) & 0x3E0u) | ((hcs2 >> 27) & 0x1Fu);
-    dcbaa = halloc((slots + 1u) * 8u, 64);
-    if (!dcbaa) return -4;
-    memset(dcbaa, 0, (slots + 1u) * 8u);
+    hc->dcbaa = halloc((slots + 1u) * 8u, 64);
+    if (!hc->dcbaa) return -4;
+    memset(hc->dcbaa, 0, (slots + 1u) * 8u);
     if (scratch) {
         if (scratch > 32) scratch = 32;
         uint64_t *spa = halloc(scratch * 8u, 64);
@@ -647,70 +834,84 @@ static int start_controller(uint32_t mmio, int bus, int dev, int fn) {
             flush_range(page, 4096);
             spa[i] = (uint64_t)(uintptr_t)page;
         }
-        dcbaa[0] = (uint64_t)(uintptr_t)spa;
+        hc->dcbaa[0] = (uint64_t)(uintptr_t)spa;
         flush_range(spa, scratch * 8u);
     }
-    flush_range(dcbaa, (slots + 1u) * 8u);
-    if (ring_init(&cmd, 32, 1) || ring_init(&event, 64, 0)) return -6;
+    flush_range(hc->dcbaa, (slots + 1u) * 8u);
+    if (ring_init(&hc->cmd, 32, 1) || ring_init(&hc->event, 64, 0)) return -6;
     uint32_t *erst = halloc(16, 64);
     if (!erst) return -7;
-    erst[0] = (uint32_t)(uintptr_t)event.trb;
+    erst[0] = (uint32_t)(uintptr_t)hc->event.trb;
     erst[1] = 0;
-    erst[2] = event.size;
+    erst[2] = hc->event.size;
     erst[3] = 0;
-    wr(op + (0x38 / 4), slots);
-    wr64(op + (0x18 / 4), (uint32_t)(uintptr_t)cmd.trb | 1u);
-    wr64(op + (0x30 / 4), (uint32_t)(uintptr_t)dcbaa);
-    wr(rt + (0x08 / 4), 1);
-    wr64(rt + (0x10 / 4), (uint32_t)(uintptr_t)erst);
-    wr64(rt + (0x18 / 4), (uint32_t)(uintptr_t)event.trb);
-    wr(rt, 0x2);
-    wr(op, rd(op) | 1u | 4u);
+    wr(hc->op + (0x38 / 4), slots);
+    wr64(hc->op + (0x18 / 4), (uint32_t)(uintptr_t)hc->cmd.trb | 1u);
+    wr64(hc->op + (0x30 / 4), (uint32_t)(uintptr_t)hc->dcbaa);
+    wr(hc->rt + (0x08 / 4), 1);
+    wr64(hc->rt + (0x10 / 4), (uint32_t)(uintptr_t)erst);
+    wr64(hc->rt + (0x18 / 4), (uint32_t)(uintptr_t)hc->event.trb);
+    wr(hc->rt, 0x2);
+    wr(hc->op, rd(hc->op) | 1u | 4u);
     for (int i = 0; i < 100; i++) {
-        if ((rd(op + 1) & 1u) == 0) break;
+        if ((rd(hc->op + 1) & 1u) == 0) break;
         wait_ms(10);
     }
-    if (rd(op + 1) & 1u) return -8;
-    wait_ms(300);
-    ep_count = 0;
-    for (uint32_t p = 0; p < ports; p++) {
-        int speed = port_reset((int)p);
-        if (speed < 1) continue;
-        saw_devs++;
-        serial_write("XHCI: port ");
-        serial_dec(p + 1);
-        serial_write(" speed ");
-        serial_dec((uint32_t)speed);
-        serial_write("\n");
-        int rc = enumerate_device((int)p, speed, 0, 0, 0, slots, 0, 0, 0);
-        if (rc) {
-            last_err = rc;
-            serial_write("XHCI: port error ");
-            serial_dec((uint32_t)(-rc));
+    if (rd(hc->op + 1) & 1u) return -8;
+    hc->alive = 1;
+    ctrl_count++;
+    wait_ms(100);
+    uint32_t seen = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        int keyboard = 0;
+        for (int i = 0; i < ep_count; i++) if (eps[i].kind == 1) keyboard = 1;
+        if (keyboard) break;
+        if (pass) wait_ms(200);
+        for (uint32_t p = 0; p < ports; p++) {
+            if (seen & (1u << p)) continue;
+            int speed = port_reset(hc, (int)p);
+            if (speed < 1) continue;
+            seen |= 1u << p;
+            saw_devs++;
+            serial_write("XHCI: port ");
+            serial_dec(p + 1);
+            serial_write(" speed ");
+            serial_dec((uint32_t)speed);
             serial_write("\n");
+            int rc = enumerate_device(hc, (int)p, speed, 0, 0, 0, slots, 0, 0, 0);
+            if (rc) {
+                last_err = rc;
+                serial_write("XHCI: port error ");
+                serial_dec((uint32_t)(rc < 0 ? -rc : rc));
+                serial_write("\n");
+            }
         }
     }
-    ready = ep_count > 0;
     note_status();
-    return ready ? 0 : -9;
-}
-
-static int same_controller(int bus, int dev, int fn) {
-    const BootInfo *bi = bootinfo();
-    if (!(bi->magic == BOOTINFO_MAGIC && (bi->xhci_pci & 0x80000000u))) return 0;
-    return bus == (int)((bi->xhci_pci >> 16) & 0xFF) &&
-           dev == (int)((bi->xhci_pci >> 8) & 0x1F) &&
-           fn == (int)(bi->xhci_pci & 7);
+    return 0;
 }
 
 void xhci_init(void) {
-    ready = 0;
-    saw_controller = saw_devs = saw_hubs = last_err = 0;
+    ctrl_count = 0;
+    ep_count = 0;
+    saw_ctl = saw_ports = saw_devs = saw_hubs = last_err = last_code = 0;
+    next_window = 0xF2000000u;
+    heap = XHCI_HEAP;
+    heap_used = 0;
+    memset(heap, 0, XHCI_HEAP_SIZE);
+    ctrls = halloc(sizeof(Ctrl) * MAX_CTL, 16);
+    eps = halloc(sizeof(HidEp) * MAX_HID, 16);
+    if (!ctrls || !eps) {
+        set_status("USB mem");
+        return;
+    }
+    memset(ctrls, 0, sizeof(Ctrl) * MAX_CTL);
+    memset(eps, 0, sizeof(HidEp) * MAX_HID);
     set_status("No USB chip");
     int tried = 0;
-    for (int bus = 0; bus < 256 && !ready; bus++) {
-        for (int dev = 0; dev < 32 && !ready; dev++) {
-            for (int fn = 0; fn < 8 && !ready; fn++) {
+    for (int bus = 0; bus < 256 && ctrl_count < MAX_CTL; bus++) {
+        for (int dev = 0; dev < 32 && ctrl_count < MAX_CTL; dev++) {
+            for (int fn = 0; fn < 8 && ctrl_count < MAX_CTL; fn++) {
                 uint32_t id = pci_read(bus, dev, fn, 0);
                 if (id == 0xFFFFFFFFu || id == 0) {
                     if (fn == 0) break;
@@ -724,47 +925,64 @@ void xhci_init(void) {
                 }
                 tried++;
                 uint32_t lo = pci_read(bus, dev, fn, 0x10);
-                uint32_t hi = ((lo & 7u) == 4u) ? pci_read(bus, dev, fn, 0x14) : 0;
-                uint32_t mmio = lo & ~0xFu;
-                if (hi) {
-                    if (same_controller(bus, dev, fn)) mmio = bootinfo()->xhci_mmio;
-                    else {
-                        set_status("USB BAR high");
-                        if (fn == 0 && !(pci_read(bus, dev, 0, 0x0C) & 0x00800000u)) break;
-                        continue;
-                    }
+                if (lo & 1u) {
+                    if (fn == 0 && !(pci_read(bus, dev, 0, 0x0C) & 0x00800000u)) break;
+                    continue;
                 }
-                if (start_controller(mmio, bus, dev, fn) == 0) return;
+                uint32_t hi = ((lo & 7u) == 4u) ? pci_read(bus, dev, fn, 0x14) : 0;
+                uint64_t phys = ((uint64_t)hi << 32) | (lo & ~0xFu);
+                uint32_t mmio = 0;
+                if (!hi) {
+                    force_uc(phys);
+                    mmio = (uint32_t)phys;
+                } else if (same_controller(bus, dev, fn) && bootinfo()->xhci_mmio) {
+                    mmio = bootinfo()->xhci_mmio;
+                } else {
+                    mmio = map_high_bar(phys);
+                }
+                if (!mmio) {
+                    set_status("USB BAR high");
+                    serial_write("XHCI: unmapped BAR\n");
+                } else {
+                    start_controller(mmio, bus, dev, fn);
+                }
                 if (fn == 0 && !(pci_read(bus, dev, 0, 0x0C) & 0x00800000u)) break;
             }
         }
     }
     if (!tried) set_status("No USB chip");
-    else if (!saw_controller) set_status("USB BAR high");
+    else if (!saw_ctl && !last_err) set_status("USB BAR high");
+    else note_status();
     serial_write("XHCI: ");
     serial_write(status_line);
     serial_write("\n");
 }
 
 void xhci_poll(void) {
-    if (!ready) return;
-    Trb ev;
-    while (event_poll(&ev)) {
-        uint32_t type = (ev.d[3] >> 10) & 0x3Fu;
-        if (type != 32) continue;
-        uint32_t code = ev.d[2] >> 24;
-        for (int i = 0; i < ep_count; i++) {
-            if ((uint32_t)(uintptr_t)eps[i].posted != ev.d[0]) continue;
-            flush_range(eps[i].report, eps[i].mps);
-            if (code == 1 || code == 13) {
-                if (eps[i].kind == 1) hid_keyboard(&eps[i]);
-                else if (eps[i].kind == 2 && eps[i].mps >= 3) {
-                    int dx = (int)(int8_t)eps[i].report[1];
-                    int dy = (int)(int8_t)eps[i].report[2];
-                    input_post_mouse(dx, dy, eps[i].report[0] & 3);
+    if (!ctrls || !eps) return;
+    for (int c = 0; c < ctrl_count; c++) {
+        Ctrl *hc = &ctrls[c];
+        if (!hc->alive) continue;
+        Trb ev;
+        int guard = 0;
+        while (guard++ < 32 && event_poll(hc, &ev)) {
+            uint32_t type = (ev.d[3] >> 10) & 0x3Fu;
+            if (type != 32) continue;
+            uint32_t code = ev.d[2] >> 24;
+            for (int i = 0; i < ep_count; i++) {
+                if (eps[i].ctrl != c) continue;
+                if ((uint32_t)(uintptr_t)eps[i].posted != ev.d[0]) continue;
+                flush_range(eps[i].report, eps[i].mps);
+                if (code == 1 || code == 13) {
+                    if (eps[i].kind == 1) hid_keyboard(&eps[i]);
+                    else if (eps[i].kind == 2 && eps[i].mps >= 3) {
+                        int dx = (int)(int8_t)eps[i].report[1];
+                        int dy = (int)(int8_t)eps[i].report[2];
+                        input_post_mouse(dx, dy, eps[i].report[0] & 3);
+                    }
                 }
+                arm_interrupt(hc, &eps[i]);
             }
-            arm_interrupt(&eps[i]);
         }
     }
 }

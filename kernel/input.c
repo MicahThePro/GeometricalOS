@@ -12,6 +12,8 @@ int mouse_x, mouse_y, mouse_buttons;
 static int shift, ctrl, alt, caps, e0;
 static uint32_t ticks;
 static uint16_t pit_last;
+static uint16_t pit_div;
+static uint32_t pit_acc;
 static int pit_on;
 
 static KeyEvent kq[32];
@@ -48,21 +50,29 @@ static uint16_t pit_read(void) {
 }
 
 static void pit_init(void) {
-    uint16_t div = (uint16_t)(1193182u / 100u);
+    pit_div = (uint16_t)(1193182u / 100u);
     outb(0x43, 0x34);
-    outb(0x40, (uint8_t)(div & 0xFF));
-    outb(0x40, (uint8_t)(div >> 8));
+    outb(0x40, (uint8_t)(pit_div & 0xFF));
+    outb(0x40, (uint8_t)(pit_div >> 8));
     pit_last = pit_read();
+    pit_acc = 0;
     pit_on = 1;
 }
 
 uint32_t timer_ticks(void) { return ticks; }
 
 void input_timer(void) {
-    if (!pit_on) return;
+    if (!pit_on || !pit_div) return;
     uint16_t now = pit_read();
-    if (now > pit_last) ticks++;
+    uint32_t step = pit_last >= now ? (uint32_t)(pit_last - now)
+                                    : (uint32_t)pit_last + pit_div - now;
+    if (step > pit_div) step = pit_div;
     pit_last = now;
+    pit_acc += step;
+    while (pit_acc >= pit_div) {
+        pit_acc -= pit_div;
+        ticks++;
+    }
 }
 
 static void key_push(int code) {
@@ -237,86 +247,124 @@ static void mouse_feed(uint8_t b) {
     mouse_apply();
 }
 
-static int ps2_wait_write(void) {
+static int ps2_wait_in(void) {
     for (int i = 0; i < 100000; i++)
         if (!(inb(0x64) & 2)) return 0;
     return -1;
 }
-static int ps2_wait_read(void) {
-    for (int i = 0; i < 100000; i++)
-        if (inb(0x64) & 1) return 0;
-    return -1;
-}
-static void ps2_cmd(uint8_t c) {
-    if (ps2_wait_write()) return;
-    outb(0x64, c);
-}
-static void ps2_data(uint8_t c) {
-    if (ps2_wait_write()) return;
-    outb(0x60, c);
-}
-static int ps2_read(void) {
-    if (ps2_wait_read()) return -1;
-    return inb(0x60);
-}
-static void mouse_write(uint8_t v) {
-    ps2_cmd(0xD4);
-    ps2_data(v);
-}
-static void mouse_ack(void) {
-    for (int i = 0; i < 10000; i++) {
-        if (inb(0x64) & 1) {
-            if (inb(0x60) == 0xFA) return;
+
+static int ps2_wait_byte(int spins) {
+    for (int i = 0; i < spins; i++) {
+        uint8_t st = inb(0x64);
+        if (st & 1) {
+            uint8_t d = inb(0x60);
+            if (st & 0x20) {
+                mouse_feed(d);
+                continue;
+            }
+            return d;
         }
     }
-}
-
-static void irq_mask_polling(void) {
-    /* The kernel polls the controller. Mask the keyboard and mouse IRQs
-     * so a leftover BIOS handler cannot consume a byte between our reads.
-     */
-    outb(0x21, (uint8_t)(inb(0x21) | 0x02));
-    outb(0xA1, (uint8_t)(inb(0xA1) | 0x10));
+    return -1;
 }
 
 static void ps2_flush(void) {
-    for (int i = 0; i < 32 && (inb(0x64) & 1); i++) inb(0x60);
-}
-
-/* The Omen keyboard is attached to this controller. Leave the USB
- * controller alone when the keyboard answers, or resetting USB stops the keys. */
-static int ps2_expect(uint8_t want) {
-    for (int i = 0; i < 6; i++) {
-        int v = ps2_read();
-        if (v == (int)want) return 1;
-        if (v < 0) return 0;
+    for (int i = 0; i < 32; i++) {
+        if (!(inb(0x64) & 1)) return;
+        inb(0x60);
     }
-    return 0;
 }
 
-static int ps2_keyboard_init(void) {
-    irq_mask_polling();
-    ps2_flush();
-    /* Leave USB alone. Resetting it was stopping the laptop keyboard. */
-    ps2_cmd(0xAE);
-    ps2_cmd(0x60);
-    ps2_data(0x65);
-    ps2_flush();
-    ps2_data(0xF4);
-    ps2_expect(0xFA);
+static void ps2_cmd(uint8_t c) {
+    if (ps2_wait_in()) return;
+    outb(0x64, c);
+}
+
+static void ps2_kbd(uint8_t c) {
+    if (ps2_wait_in()) return;
+    outb(0x60, c);
+}
+
+static int ps2_collect(uint8_t a, uint8_t b, int reads, int spins) {
+    int hit = 0;
+    for (int n = 0; n < reads; n++) {
+        int v = ps2_wait_byte(spins);
+        if (v < 0) break;
+        if (v == (int)a || v == (int)b) hit = 1;
+        if (v == (int)b) break;
+    }
+    return hit;
+}
+
+static int ps2_acked;
+static uint32_t ps2_retry_at;
+static int ps2_retries;
+
+/* HP's firmware leaves the keyboard clock off. Turn the port back on,
+ * reset the keyboard, then tell it to scan. Do this before USB setup so a
+ * key pressed during enumeration is still waiting afterwards. */
+static void ps2_bringup(void) {
+    int floating = 0;
+    for (int i = 0; i < 16; i++) if (inb(0x64) == 0xFF) floating++;
     mouse_x = gfx_width() / 2;
     mouse_y = gfx_height() / 2;
     prev_btn = 0;
     pkt_i = 0;
     pkt_tick = 0;
-    serial_write("KBD: listen\n");
-    return 1;
+    ps2_retry_at = 200;
+    ps2_retries = 0;
+    if (floating > 12) {
+        serial_write("KBD: no controller\n");
+        return;
+    }
+    ps2_cmd(0xAD);
+    ps2_cmd(0xA7);
+    ps2_flush();
+    ps2_cmd(0x20);
+    int cfg = ps2_wait_byte(100000);
+    if (cfg < 0) cfg = 0x45;
+    cfg |= 0x01;          /* keyboard irq */
+    cfg |= 0x40;          /* translate set 2 into set 1 */
+    cfg &= ~0x10;         /* keyboard clock on */
+    cfg &= ~0x20;         /* mouse clock on */
+    ps2_cmd(0x60);
+    ps2_kbd((uint8_t)cfg);
+    ps2_cmd(0xAE);
+    ps2_flush();
+    ps2_kbd(0xFF);
+    int reset = ps2_collect(0xFA, 0xAA, 8, 400000);
+    ps2_kbd(0xF4);
+    ps2_acked = ps2_collect(0xFA, 0xFA, 4, 200000);
+    ps2_cmd(0xA8);
+    ps2_cmd(0xD4);
+    ps2_kbd(0xF4);
+    ps2_collect(0xFA, 0xFA, 2, 50000);
+    ps2_flush();
+    serial_write(reset ? "KBD: reset\n" : "KBD: no reset\n");
+    serial_write(ps2_acked ? "KBD: scanning\n" : "KBD: no ack\n");
+}
+
+static void ps2_drain(void) {
+    for (int n = 0; n < 16; n++) {
+        uint8_t st = inb(0x64);
+        if (st == 0xFF || !(st & 1)) break;
+        uint8_t d = inb(0x60);
+        byte_count++;
+        if (st & 0x20) mouse_feed(d);
+        else kbd_feed(d);
+    }
+}
+
+void input_idle(void) {
+    ps2_drain();
+    input_timer();
 }
 
 void input_init(void) {
     pit_init();
-    ps2_keyboard_init();
+    ps2_bringup();
     xhci_init();
+    if (ps2_acked) xhci_append_status(" ps2");
 }
 
 void input_post_mouse(int dx, int dy, int buttons) {
@@ -338,33 +386,22 @@ void input_post_mouse(int dx, int dy, int buttons) {
     if (changed & 2) mouse_push((btn & 2) ? MOUSE_RDOWN : MOUSE_RUP);
 }
 
-static int ps2_chip(void) {
-    int floating = 0;
-    for (int i = 0; i < 64; i++) if (inb(0x64) == 0xFF) floating++;
-    return floating < 48;
-}
-
 void input_post_scancode(uint8_t scancode) {
     byte_count++;
     kbd_feed(scancode);
 }
 
 void input_poll(void) {
-    xhci_poll();
-    for (int n = 0; n < 32; n++) {
-        uint32_t flags;
-        __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
-        uint8_t st = inb(0x64);
-        if (!(st & 1)) {
-            if (flags & 0x200) __asm__ volatile ("sti");
-            break;
-        }
-        uint8_t d = inb(0x60);
-        byte_count++;
-        if (flags & 0x200) __asm__ volatile ("sti");
-        if ((st & 0x20) && pkt_i) mouse_feed(d);
-        else kbd_feed(d);
+    ps2_drain();
+    /* Some HP keyboards answer only after the embedded controller finishes
+     * starting. Ask again until a real byte shows up. */
+    if (!byte_count && ps2_retries < 4 && timer_ticks() >= ps2_retry_at) {
+        ps2_retries++;
+        ps2_retry_at = timer_ticks() + 300;
+        ps2_kbd(0xF4);
     }
+    xhci_poll();
+    ps2_drain();
     if (vmm_display_poll())
         mouse_clamp();
     if (vmm_mouse_poll(&mouse_x, &mouse_y, gfx_width(), gfx_height()))
