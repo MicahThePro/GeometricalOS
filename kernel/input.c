@@ -861,6 +861,23 @@ void input_init(void) {
     if (ps2_acked) xhci_append_status(" ps2");
 }
 
+void input_set_pointer(int x, int y, int buttons) {
+    mouse_x = x;
+    mouse_y = y;
+    mouse_clamp();
+    int btn = buttons & 7;
+    int changed = btn ^ prev_btn;
+    prev_btn = btn;
+    mouse_buttons = btn;
+    if (changed) {
+        serial_write("MOUSE btn ");
+        serial_dec((uint32_t)btn);
+        serial_write("\n");
+    }
+    if (changed & 1) mouse_push((btn & 1) ? MOUSE_LDOWN : MOUSE_LUP);
+    if (changed & 2) mouse_push((btn & 2) ? MOUSE_RDOWN : MOUSE_RUP);
+}
+
 void input_post_mouse(int dx, int dy, int buttons) {
     usb_mouse_packets++;
     if (dx > 40) dx = 40;
@@ -877,6 +894,11 @@ void input_post_mouse(int dx, int dy, int buttons) {
     int changed = btn ^ prev_btn;
     prev_btn = btn;
     mouse_buttons = btn;
+    if (changed) {
+        serial_write("MOUSE btn ");
+        serial_dec((uint32_t)btn);
+        serial_write("\n");
+    }
     if (changed & 1) mouse_push((btn & 1) ? MOUSE_LDOWN : MOUSE_LUP);
     if (changed & 2) mouse_push((btn & 2) ? MOUSE_RDOWN : MOUSE_RUP);
 }

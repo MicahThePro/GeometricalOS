@@ -60,6 +60,7 @@ void input_poll(void);
 void input_idle(void);
 void input_post_scancode(uint8_t scancode);
 void input_post_mouse(int dx, int dy, int buttons);
+void input_set_pointer(int x, int y, int buttons);
 void input_timer(void);
 int input_key(KeyEvent *ev);
 int input_mouse(MouseEvent *ev);
