@@ -34,7 +34,9 @@ static int sb_checked;
 static int sb_dma_active;
 static uint32_t sb_dma_until;
 #define SB16_RATE 11025u
-#define SB16_DMA_ADDR 0x78000u
+/* Above the kernel image and the 64-bit stack, below the 32-bit stack.
+ * Stays inside one 64 KB DMA page so the channel 1 count never wraps. */
+#define SB16_DMA_ADDR 0x81000u
 #define SB16_MAX_SAMPLES 16000u
 
 static void sb_mixer(uint8_t reg, uint8_t val);

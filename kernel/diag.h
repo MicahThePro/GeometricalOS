@@ -3,5 +3,6 @@
 
 void diag_run(void);
 void diag_draw_build_id(int x, int y, int scale);
+int diag_was_shown(void);
 
 #endif

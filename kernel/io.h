@@ -49,5 +49,6 @@ int strncasecmp(const char *a, const char *b, size_t n);
 void strcpy(char *dst, const char *src);
 void strncpy(char *dst, const char *src, size_t n);
 int strncmp(const char *a, const char *b, size_t n);
+int kfmt(char *dst, int cap, const char *fmt, ...);
 
 #endif

@@ -43,6 +43,6 @@ SECTIONS
         *(.note.GNU-stack)
     }
 
-    /* Sound Blaster playback uses 0x78000. Stay below it. */
-    ASSERT(bss_end < 0x78000, "Kernel image overlaps the stack")
+    /* The 64-bit stack is reserved at 0x7C000. Stay below it. */
+    ASSERT(bss_end < 0x7C000, "Kernel image overlaps the stack")
 }

@@ -154,7 +154,7 @@ static int boot_console(const BootInfo *bi, const AtaDisk *disk,
         }
         if (open_diag) break;
     }
-    if (open_diag) diag_run();
+    if (open_diag || !bi->from_hdd) diag_run();
     MouseEvent mouse;
     while (input_mouse(&mouse)) {}
     return recovery;

@@ -29,5 +29,12 @@ const XhciHandoff *xhci_handoff_at(int index);
 const char *xhci_status_line(void);
 void xhci_set_status_line(const char *text);
 void xhci_append_status(const char *extra);
+uint32_t xhci_kbd_reports(void);
+uint32_t xhci_mouse_reports(void);
+uint32_t xhci_hid_errors(void);
+int xhci_hid_last_error(void);
+/* Marks the 2 MB page holding phys uncached in the kernel page tables. */
+void xhci_force_uc(uint32_t phys);
+void *xhci_heap_alloc(uint32_t size);
 
 #endif

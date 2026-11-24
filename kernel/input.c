@@ -8,6 +8,7 @@
 #include "settings.h"
 #include "sound.h"
 #include "xhci.h"
+#include "i2chid.h"
 
 int mouse_x, mouse_y, mouse_buttons;
 
@@ -77,6 +78,14 @@ static void pit_init(void) {
 }
 
 uint32_t timer_ticks(void) { return ticks; }
+
+/* Microseconds from the TSC. Uncalibrated, it still advances per call so
+ * polling deadlines expire. */
+uint64_t timer_us(void) {
+    static uint64_t fallback;
+    if (!tsc_per_ms) return fallback += 2;
+    return rdtsc_now() * 1000u / tsc_per_ms;
+}
 
 const char *timer_source(void) { return clock_source; }
 int timer_pit_alive(void) { return pit_alive; }
@@ -240,26 +249,17 @@ static uint8_t set2_to_set1(uint8_t c) {
     }
 }
 
-static void kbd_feed(uint8_t sc) {
-    static int set2, f0;
-    if (force_set2) set2 = 1;
-    if (sc == 0xF0) { f0 = 1; set2 = 1; return; }
-    if (sc == 0xE0) { e0 = 1; return; }
-    if (sc == 0xE1) return;
-    if (set2 && !e0) {
-        int release = f0;
-        f0 = 0;
-        uint8_t s1 = set2_to_set1(sc);
-        if (!s1) return;
-        sc = (uint8_t)(s1 | (release ? 0x80 : 0));
-    }
-    int release = sc & 0x80;
+/* One set-1 make or break code. ext is the E0 prefix. */
+static void key_set1(uint8_t sc, int ext, int release) {
     sc &= 0x7F;
-    if (e0) {
-        e0 = 0;
+    if (ext) {
+        if (sc == 0x1D) { ctrl = !release; return; }
+        if (sc == 0x38) { alt = !release; return; }
         if (release) return;
         int code = 0;
-        if (sc == 0x48) code = KEY_UP;
+        if (sc == 0x1C) code = 10;
+        else if (sc == 0x35) code = '/';
+        else if (sc == 0x48) code = KEY_UP;
         else if (sc == 0x50) code = KEY_DOWN;
         else if (sc == 0x4B) code = KEY_LEFT;
         else if (sc == 0x4D) code = KEY_RIGHT;
@@ -287,6 +287,24 @@ static void kbd_feed(uint8_t sc) {
     if (caps && ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
     else if (caps && ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
     key_push((unsigned char)ch);
+}
+
+static void kbd_feed(uint8_t sc) {
+    static int set2, f0;
+    if (force_set2) set2 = 1;
+    if (sc == 0xF0) { f0 = 1; set2 = 1; return; }
+    if (sc == 0xE0) { e0 = 1; return; }
+    if (sc == 0xE1) return;
+    if (set2 && !e0) {
+        int release = f0;
+        f0 = 0;
+        uint8_t s1 = set2_to_set1(sc);
+        if (!s1) return;
+        sc = (uint8_t)(s1 | (release ? 0x80 : 0));
+    }
+    int ext = e0;
+    e0 = 0;
+    key_set1(sc, ext, (sc & 0x80) != 0);
 }
 
 static uint8_t pkt[3];
@@ -859,6 +877,7 @@ void input_init(void) {
     ps2_bringup(0);
     xhci_init();
     if (ps2_acked) xhci_append_status(" ps2");
+    i2chid_init();
 }
 
 void input_set_pointer(int x, int y, int buttons) {
@@ -909,6 +928,14 @@ void input_post_scancode(uint8_t scancode) {
     kbd_feed(scancode);
 }
 
+/* USB keys arrive as set 1 and must not pass through the PS/2 set-2
+ * decoder, which a stray 0xF0 from the 8042 switches on for good. */
+void input_post_set1(uint8_t scancode, int ext, int release) {
+    usb_kbd_packets++;
+    byte_count++;
+    key_set1(scancode, ext, release);
+}
+
 void input_poll(void) {
     ps2_drain();
     /* Some HP keyboards answer only after the embedded controller finishes
@@ -920,6 +947,7 @@ void input_poll(void) {
         ps2_out60(0xF4);
     }
     xhci_poll();
+    i2chid_poll();
     ps2_drain();
     if (vmm_display_poll())
         mouse_clamp();

@@ -160,6 +160,58 @@ int acpi_irq1(uint32_t *ioapic, uint32_t *gsi, int *level, int *low) {
     return have;
 }
 
+static int root_table(uint32_t *root, int *wide) {
+    uint32_t rsdp_phys = find_rsdp();
+    if (!rsdp_phys) return 0;
+    Rsdp *rsdp = (Rsdp *)(uintptr_t)rsdp_phys;
+    *root = 0;
+    *wide = 0;
+    if (rsdp->revision >= 2 && rsdp->length >= 36 &&
+        bytes_sum_ok((const uint8_t *)rsdp, rsdp->length) &&
+        rsdp->xsdt && rsdp->xsdt <= 0xFFFFF000ull) {
+        *root = (uint32_t)rsdp->xsdt;
+        *wide = 1;
+    } else if (bytes_sum_ok((const uint8_t *)rsdp, 20)) {
+        *root = rsdp->rsdt;
+    }
+    return *root != 0;
+}
+
+static int sig_is(const AcpiHeader *h, const char *sig) {
+    return h->sig[0] == sig[0] && h->sig[1] == sig[1] && h->sig[2] == sig[2] && h->sig[3] == sig[3];
+}
+
+const uint8_t *acpi_table(const char *sig, int index) {
+    uint32_t root;
+    int wide;
+    if (!root_table(&root, &wide)) return 0;
+    AcpiHeader *xs = (AcpiHeader *)(uintptr_t)root;
+    if (xs->length < 36 || xs->length > 0x10000u) return 0;
+    uint32_t entry = wide ? 8u : 4u;
+    uint32_t n = (xs->length - 36u) / entry;
+    const uint8_t *p = (const uint8_t *)xs + 36;
+    int want_dsdt = sig[0] == 'D' && sig[1] == 'S' && sig[2] == 'D' && sig[3] == 'T';
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t phys = wide ? *(const uint64_t *)(p + i * 8u) : *(const uint32_t *)(p + i * 4u);
+        if (phys < 0x1000ull || phys > 0xFFFFF000ull) continue;
+        AcpiHeader *child = (AcpiHeader *)(uintptr_t)phys;
+        if (want_dsdt) {
+            if (!sig_is(child, "FACP")) continue;
+            const uint8_t *f = (const uint8_t *)child;
+            uint64_t dsdt = *(const uint32_t *)(f + 40);
+            if (child->length >= 148) {
+                uint64_t x = *(const uint64_t *)(f + 140);
+                if (x && x <= 0xFFFFF000ull) dsdt = x;
+            }
+            if (!dsdt || dsdt > 0xFFFFF000ull) return 0;
+            return index == 0 ? (const uint8_t *)(uintptr_t)dsdt : 0;
+        }
+        if (!sig_is(child, sig)) continue;
+        if (index-- == 0) return (const uint8_t *)child;
+    }
+    return 0;
+}
+
 void acpi_bringup(void) {
     step_n = 0;
     uint32_t rsdp_phys = find_rsdp();

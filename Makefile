@@ -11,7 +11,7 @@ MINGWOBJ := x86_64-w64-mingw32-objcopy
 
 BUILD   := build
 BUILD_HASH := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
-BUILD_UTC := $(shell TZ=UTC git log -1 --date=format:%Y%m%dT%H%M%SZ --format=%cd 2>/dev/null || echo unknown)
+BUILD_UTC := $(shell date -u +%Y%m%dT%H%M%SZ)
 CFLAGS  := -std=gnu11 -m32 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
            -fno-builtin -fno-asynchronous-unwind-tables -fno-unwind-tables \
            -mno-sse -mno-mmx -msoft-float -Os -Wall -Wextra \
@@ -29,7 +29,7 @@ C_SRCS := \
 	kernel/app_recycle.c kernel/app_write.c kernel/app_charmap.c kernel/app_cardfile.c kernel/app_recovery.c \
 	kernel/app_tools.c kernel/app_ftp.c \
 	kernel/sound.c kernel/wallpaper.c kernel/login.c kernel/font8x16_fallback.c \
-	kernel/desktop.c kernel/setup.c 	kernel/pci.c kernel/xhci.c kernel/nvme.c kernel/vmm.c \
+	kernel/desktop.c kernel/setup.c 	kernel/pci.c kernel/xhci.c kernel/i2chid.c kernel/i2cscan.c kernel/nvme.c kernel/vmm.c \
 	kernel/memmap.c kernel/hpet.c kernel/acpi.c kernel/diag.c \
 	kernel/settings.c kernel/app_control.c kernel/app_player.c \
 	kernel/main.c

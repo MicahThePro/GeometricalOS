@@ -590,8 +590,8 @@ efi_status efi_main(efi_handle image, EfiSystemTable *st) {
 
     reserve_at(bs, st, 0x6000, 1, "bootinfo");
     reserve_at(bs, st, 0x7000, 1, "trampoline");
-    reserve_at(bs, st, 0x10000, 0x68, "kernel");
-    reserve_at(bs, st, 0x78000, 4, "sound");
+    reserve_at(bs, st, 0x10000, 0x6C, "kernel");
+    reserve_at(bs, st, 0x81000, 4, "sound");
     reserve_at(bs, st, 0x7C000, 5, "stack64");
     reserve_at(bs, st, 0x8C000, 5, "stack32");
     if (!try_reserve(bs, 0x1100000, 240)) {
